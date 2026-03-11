@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -95,139 +96,64 @@ func (c *Config) GetDatabase() string {
 	return c.DBName
 }
 
-// AllowMultiStatements returns whether multi-statement queries are allowed
+// AllowMultiStatements implements CapabilityConfig
 func (c *Config) AllowMultiStatements() bool {
 	return c.MultiStatements
 }
 
-// UseAffectedRows returns whether to use affected rows instead of found rows
+// UseAffectedRows implements CapabilityConfig
 func (c *Config) UseAffectedRows() bool {
 	return !c.ClientFoundRows
 }
 
-// AllowLocalInfile returns whether local infile is allowed
+// AllowLocalInfile implements CapabilityConfig
 func (c *Config) AllowLocalInfile() bool {
 	return c.AllowAllFiles
 }
 
-// UseBulkStmts returns whether bulk statements are used
+// UseBulkStmts implements CapabilityConfig
 func (c *Config) UseBulkStmts() bool {
 	return false // Not implemented yet
 }
 
-// UseCompression returns whether compression is enabled
+// UseCompression implements CapabilityConfig
 func (c *Config) UseCompression() bool {
 	return c.Compress
 }
 
-// GetProtocol returns the protocol
-func (c *Config) GetProtocol() string {
-	return c.Net
-}
+// normalizeConfig normalizes and validates the configuration
+func normalizeConfig(cfg *Config) error {
+	if cfg.Net == "" {
+		cfg.Net = "tcp"
+	}
 
-// GetHost returns the host
-func (c *Config) GetHost() string {
-	return c.Host
-}
+	if cfg.Addr == "" {
+		if cfg.Net == "unix" {
+			if cfg.Socket != "" {
+				cfg.Addr = cfg.Socket
+			} else {
+				cfg.Addr = "/tmp/mysql.sock"
+				cfg.Socket = cfg.Addr
+			}
+		} else {
+			if cfg.Host == "" {
+				cfg.Host = "127.0.0.1"
+			}
+			if cfg.Port == 0 {
+				cfg.Port = 3306
+			}
+			cfg.Addr = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+		}
+	}
 
-// GetPort returns the port
-func (c *Config) GetPort() int {
-	return c.Port
-}
+	if cfg.TLS != nil && cfg.TLS.ServerName == "" && !cfg.TLS.InsecureSkipVerify {
+		host, _, err := net.SplitHostPort(cfg.Addr)
+		if err == nil {
+			cfg.TLS.ServerName = host
+		}
+	}
 
-// GetSocket returns the socket path
-func (c *Config) GetSocket() string {
-	return c.Socket
-}
-
-// GetTimeout returns the timeout
-func (c *Config) GetTimeout() time.Duration {
-	return c.Timeout
-}
-
-// GetReadTimeout returns the read timeout
-func (c *Config) GetReadTimeout() time.Duration {
-	return c.ReadTimeout
-}
-
-// GetWriteTimeout returns the write timeout
-func (c *Config) GetWriteTimeout() time.Duration {
-	return c.WriteTimeout
-}
-
-// GetCharset returns the charset
-func (c *Config) GetCharset() string {
-	return c.Charset
-}
-
-// GetCollation returns the collation
-func (c *Config) GetCollation() string {
-	return c.Collation
-}
-
-// GetTLSConfig returns the TLS config name
-func (c *Config) GetTLSConfig() string {
-	return c.TLSConfig
-}
-
-// GetDebug returns whether debug is enabled
-func (c *Config) GetDebug() bool {
-	return c.Debug
-}
-
-// GetAllowCleartextPasswords returns whether cleartext passwords are allowed
-func (c *Config) GetAllowCleartextPasswords() bool {
-	return c.AllowCleartextPasswords
-}
-
-// GetAllowNativePasswords returns whether native passwords are allowed
-func (c *Config) GetAllowNativePasswords() bool {
-	return c.AllowNativePasswords
-}
-
-// GetAllowPublicKeyRetrieval returns whether public key retrieval is allowed
-func (c *Config) GetAllowPublicKeyRetrieval() bool {
-	return c.AllowPublicKeyRetrieval
-}
-
-// GetAllowLocalInfile returns whether local infile is allowed
-func (c *Config) GetAllowLocalInfile() bool {
-	return c.AllowLocalInfile()
-}
-
-// GetAllowMultiStatements returns whether multi-statement queries are allowed
-func (c *Config) GetAllowMultiStatements() bool {
-	return c.AllowMultiStatements()
-}
-
-// GetUseAffectedRows returns whether to use affected rows
-func (c *Config) GetUseAffectedRows() bool {
-	return c.UseAffectedRows()
-}
-
-// GetUseBulkStmts returns whether to use bulk statements
-func (c *Config) GetUseBulkStmts() bool {
-	return c.UseBulkStmts()
-}
-
-// GetUseCompression returns whether to use compression
-func (c *Config) GetUseCompression() bool {
-	return c.UseCompression()
-}
-
-// GetServerPubKey returns the server public key name
-func (c *Config) GetServerPubKey() string {
-	return c.ServerPubKey
-}
-
-// GetConnectionAttributes returns the connection attributes
-func (c *Config) GetConnectionAttributes() string {
-	return c.ConnectionAttributes
-}
-
-// GetParams returns the parameters
-func (c *Config) GetParams() map[string]string {
-	return c.Params
+	return nil
 }
 
 // ValidateCharset validates that the charset is UTF-8 compatible

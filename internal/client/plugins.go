@@ -13,10 +13,31 @@ import (
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 
 	"filippo.io/edwards25519"
 	"golang.org/x/crypto/pbkdf2"
+)
+
+// AuthPlugin defines the interface for authentication plugins
+type AuthPlugin interface {
+	PluginName() string
+	InitAuth(authData []byte, config *Config) ([]byte, error)
+	ContinuationAuth(authData []byte, seed []byte, config *Config) (nextPacket []byte, done bool, err error)
+}
+
+// SimpleAuth provides a no-op ContinuationAuth for plugins that don't need it
+type SimpleAuth struct{}
+
+func (s *SimpleAuth) ContinuationAuth(authData []byte, seed []byte, config *Config) ([]byte, bool, error) {
+	return nil, true, nil
+}
+
+// Common authentication errors
+var (
+	ErrNativePassword    = errors.New("mysql_native_password authentication is disabled")
+	ErrCleartextPassword = errors.New("mysql_clear_password authentication is disabled")
 )
 
 // ============================================================================

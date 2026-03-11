@@ -342,44 +342,6 @@ func parseBool(value string) bool {
 	}
 }
 
-// normalizeConfig normalizes and validates the configuration
-func normalizeConfig(cfg *Config) error {
-	// Set default network if empty
-	if cfg.Net == "" {
-		cfg.Net = "tcp"
-	}
-
-	// Compute Addr from Host/Port or Socket
-	if cfg.Addr == "" {
-		if cfg.Net == "unix" {
-			if cfg.Socket != "" {
-				cfg.Addr = cfg.Socket
-			} else {
-				cfg.Addr = "/tmp/mysql.sock"
-				cfg.Socket = cfg.Addr
-			}
-		} else {
-			if cfg.Host == "" {
-				cfg.Host = "127.0.0.1"
-			}
-			if cfg.Port == 0 {
-				cfg.Port = 3306
-			}
-			cfg.Addr = net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-		}
-	}
-
-	// Set TLS ServerName if not set
-	if cfg.TLS != nil && cfg.TLS.ServerName == "" && !cfg.TLS.InsecureSkipVerify {
-		host, _, err := net.SplitHostPort(cfg.Addr)
-		if err == nil {
-			cfg.TLS.ServerName = host
-		}
-	}
-
-	return nil
-}
-
 // FormatDSN formats a Config into a DSN string
 func FormatDSN(cfg *Config) string {
 	if cfg == nil {
