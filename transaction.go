@@ -25,9 +25,6 @@ type Tx struct {
 
 // Commit commits the transaction
 func (tx *Tx) Commit() error {
-	tx.conn.client.Lock()
-	defer tx.conn.client.Unlock()
-
 	if tx.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}
@@ -37,9 +34,6 @@ func (tx *Tx) Commit() error {
 
 // Rollback aborts the transaction
 func (tx *Tx) Rollback() error {
-	tx.conn.client.Lock()
-	defer tx.conn.client.Unlock()
-
 	if tx.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}
@@ -49,9 +43,6 @@ func (tx *Tx) Rollback() error {
 
 // Savepoint creates a savepoint with the given name
 func (tx *Tx) Savepoint(name string) error {
-	tx.conn.client.Lock()
-	defer tx.conn.client.Unlock()
-
 	if tx.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}
@@ -62,9 +53,6 @@ func (tx *Tx) Savepoint(name string) error {
 
 // RollbackToSavepoint rolls back to the specified savepoint
 func (tx *Tx) RollbackToSavepoint(name string) error {
-	tx.conn.client.Lock()
-	defer tx.conn.client.Unlock()
-
 	if tx.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}
@@ -75,9 +63,6 @@ func (tx *Tx) RollbackToSavepoint(name string) error {
 
 // ReleaseSavepoint releases the specified savepoint
 func (tx *Tx) ReleaseSavepoint(name string) error {
-	tx.conn.client.Lock()
-	defer tx.conn.client.Unlock()
-
 	if tx.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}

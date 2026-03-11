@@ -50,10 +50,6 @@ func (c *Conn) connect(ctx context.Context) error {
 
 // Prepare returns a prepared statement, bound to this connection
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
@@ -86,9 +82,6 @@ func (c *Conn) Begin() (driver.Tx, error) {
 
 // BeginTx starts and returns a new transaction
 func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
@@ -111,9 +104,7 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 			return nil, driver.ErrBadConn
 		}
 
-		// Set isolation level before starting transaction
-		setIsolation := "SET TRANSACTION ISOLATION LEVEL " + isolationLevel
-		if err := c.client.ExecInternal(ctx, setIsolation); err != nil {
+		if err := c.client.ExecInternal(ctx, "SET TRANSACTION ISOLATION LEVEL "+isolationLevel); err != nil {
 			return nil, err
 		}
 	}
@@ -131,9 +122,6 @@ func (c *Conn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, e
 
 // ExecContext executes a query that doesn't return rows
 func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
@@ -142,13 +130,11 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, driver.ErrSkip // Use prepared statement for queries with args
 	}
 
-	// Use client's Exec method which handles buffering and packet creation
 	completions, err := c.client.Exec(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// Return the last non-result-set completion directly (implements driver.Result)
 	var result *protocol.Completion
 	for _, comp := range completions {
 		if !comp.HasResultSet() {
@@ -163,33 +149,20 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 
 // QueryContext executes a query that may return rows
 func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	// Lock the client for the entire operation
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
 
 	if len(args) > 0 {
-		return nil, driver.ErrSkip // Use prepared statement for queries with args
+		return nil, driver.ErrSkip
 	}
 
-	// Use client's Query method which handles buffering and packet creation
 	completions, err := c.client.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// Error if no completion returned a result set
-	hasResultSet := false
-	for _, comp := range completions {
-		if comp.HasResultSet() {
-			hasResultSet = true
-			break
-		}
-	}
-	if !hasResultSet {
+	if !hasResultSet(completions) {
 		return nil, fmt.Errorf("query did not return a result set")
 	}
 
@@ -197,70 +170,60 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		conn:        c,
 		completions: completions,
 	}
-
-	// If the first completion has streaming rows, track as active
 	if !completions[0].Loaded {
 		c.client.SetActiveRows(rows)
 	}
-
 	return rows, nil
 }
 
 // Ping verifies the connection is still alive
 func (c *Conn) Ping(ctx context.Context) error {
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return driver.ErrBadConn
 	}
+	stop, err := c.client.WithContext(ctx)
+	if err != nil {
+		return driver.ErrBadConn
+	}
+	defer stop()
 
 	if err := c.client.Send(clientpkt.NewPing()); err != nil {
 		return err
 	}
 
-	// Read response
 	response, err := c.client.ReadPacket()
 	if err != nil {
 		return driver.ErrBadConn
 	}
-
-	// Check for error
 	if len(response) > 0 && response[0] == 0xff {
 		return server.ParseErrorPacket(response)
 	}
-
-	// Verify it's an OK packet
 	if len(response) == 0 || response[0] != 0x00 {
 		return driver.ErrBadConn
 	}
-
 	return nil
 }
 
 // ResetSession is called prior to executing a query on the connection
 // if the connection has been used before
 func (c *Conn) ResetSession(ctx context.Context) error {
-	c.client.Lock()
-	defer c.client.Unlock()
-
 	if c.client.IsClosed() {
 		return driver.ErrBadConn
 	}
+	stop, err := c.client.WithContext(ctx)
+	if err != nil {
+		return driver.ErrBadConn
+	}
+	defer stop()
 
-	// Send COM_RESET_CONNECTION if supported
 	if c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
 		if err := c.client.Send(clientpkt.NewResetConnection()); err != nil {
 			return err
 		}
-
-		// Read response
 		response, err := c.client.ReadPacket()
 		if err != nil {
 			return err
 		}
-
-		// Check for error
 		if len(response) > 0 && response[0] == 0xff {
 			return server.ParseErrorPacket(response)
 		}

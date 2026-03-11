@@ -28,9 +28,6 @@ func (s *Stmt) Close() error {
 		return nil
 	}
 
-	s.conn.client.Lock()
-	defer s.conn.client.Unlock()
-
 	if s.conn.client.IsClosed() {
 		return driver.ErrBadConn
 	}
@@ -39,12 +36,12 @@ func (s *Stmt) Close() error {
 	return s.conn.client.Send(clientpkt.NewStmtClose(s.stmtID))
 }
 
-// NumInput returns the number of placeholder parameters
+// NumInput returns the number of placeholder parameters.
+// Returns -1 when the statement is not yet prepared (pipelined mode).
 func (s *Stmt) NumInput() int {
 	if s.prepared {
 		return int(s.paramCount)
 	}
-	// For unprepared statements, return -1 to indicate unknown
 	return -1
 }
 
@@ -55,26 +52,22 @@ func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
 
 // ExecContext executes a query that doesn't return rows
 func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	s.conn.client.Lock()
-	defer s.conn.client.Unlock()
-
 	if s.conn.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
+	stop, err := s.conn.client.WithContext(ctx)
+	if err != nil {
+		return nil, driver.ErrBadConn
+	}
+	defer stop()
 
 	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
 	if err != nil {
 		return nil, err
 	}
 
-	if !s.prepared {
-		if err := s.prepareAndExecute(execPkt); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := s.conn.client.Send(execPkt); err != nil {
-			return nil, err
-		}
+	if err := s.sendExec(execPkt); err != nil {
+		return nil, err
 	}
 
 	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
@@ -101,26 +94,22 @@ func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
 
 // QueryContext executes a query that may return rows
 func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	s.conn.client.Lock()
-	defer s.conn.client.Unlock()
-
 	if s.conn.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
+	stop, err := s.conn.client.WithContext(ctx)
+	if err != nil {
+		return nil, driver.ErrBadConn
+	}
+	defer stop()
 
 	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
 	if err != nil {
 		return nil, err
 	}
 
-	if !s.prepared {
-		if err := s.prepareAndExecute(execPkt); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := s.conn.client.Send(execPkt); err != nil {
-			return nil, err
-		}
+	if err := s.sendExec(execPkt); err != nil {
+		return nil, err
 	}
 
 	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
@@ -128,15 +117,7 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 		return nil, err
 	}
 
-	// Error if no completion returned a result set
-	hasResultSet := false
-	for _, comp := range completions {
-		if comp.HasResultSet() {
-			hasResultSet = true
-			break
-		}
-	}
-	if !hasResultSet {
+	if !hasResultSet(completions) {
 		return nil, fmt.Errorf("query did not return a result set")
 	}
 
@@ -150,8 +131,16 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	return rows, nil
 }
 
+// sendExec dispatches an already-built execute packet:
+// pipelines prepare+execute when not yet prepared, or sends directly otherwise.
+func (s *Stmt) sendExec(execPkt []byte) error {
+	if s.prepared {
+		return s.conn.client.Send(execPkt)
+	}
+	return s.prepareAndExecute(execPkt)
+}
+
 // prepareInternal sends COM_STMT_PREPARE and reads the server response.
-// Must be called with conn.mu locked.
 func (s *Stmt) prepareInternal() error {
 	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
 		return err
@@ -170,7 +159,6 @@ func (s *Stmt) prepareInternal() error {
 // prepareAndExecute pipelines COM_STMT_PREPARE + COM_STMT_EXECUTE using
 // stmtID=0xFFFFFFFF as the sentinel value (MariaDB STMT_BULK_OPERATIONS).
 // Only called when CanPipelinePrepare() is true.
-// Must be called with conn.mu locked.
 func (s *Stmt) prepareAndExecute(execPkt []byte) error {
 	clientpkt.SetStmtID(execPkt, 0xFFFFFFFF)
 	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
@@ -188,6 +176,16 @@ func (s *Stmt) prepareAndExecute(execPkt []byte) error {
 	s.columnCount = columnCount
 	s.prepared = true
 	return nil
+}
+
+// hasResultSet reports whether any completion in the slice carries a result set.
+func hasResultSet(completions []*protocol.Completion) bool {
+	for _, c := range completions {
+		if c.HasResultSet() {
+			return true
+		}
+	}
+	return false
 }
 
 // valuesToNamedValues converts []driver.Value to []driver.NamedValue

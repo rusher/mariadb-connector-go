@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
@@ -25,9 +26,7 @@ type HandshakePacket struct {
 
 // ParseHandshakePacket parses the initial handshake packet from server
 func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
-	if len(data) < 4 {
-		return nil, fmt.Errorf("handshake packet too short")
-	}
+	_ = data[3]
 
 	packet := &HandshakePacket{}
 	pos := 0
@@ -45,16 +44,12 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 	pos = newPos
 
 	// Connection ID (4 bytes)
-	if pos+4 > len(data) {
-		return nil, fmt.Errorf("invalid connection ID")
-	}
-	packet.ConnectionID = protocol.GetUint32(data[pos:])
+	_ = data[pos+3]
+	packet.ConnectionID = binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
 	// Auth plugin data part 1 (8 bytes)
-	if pos+8 > len(data) {
-		return nil, fmt.Errorf("invalid auth plugin data")
-	}
+	_ = data[pos+7]
 	packet.Salt = make([]byte, 8)
 	copy(packet.Salt, data[pos:pos+8])
 	pos += 8
@@ -63,10 +58,8 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 	pos++
 
 	// Capability flags (lower 2 bytes)
-	if pos+2 > len(data) {
-		return nil, fmt.Errorf("invalid capability flags")
-	}
-	packet.ServerCapabilities = uint64(protocol.GetUint16(data[pos:]))
+	_ = data[pos+1]
+	packet.ServerCapabilities = uint64(binary.LittleEndian.Uint16(data[pos:]))
 	pos += 2
 
 	// Check if we have more data (protocol 4.1+)
@@ -77,12 +70,12 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 
 		// Server status
 		if pos+2 <= len(data) {
-			packet.ServerStatus = protocol.GetUint16(data[pos:])
+			packet.ServerStatus = binary.LittleEndian.Uint16(data[pos:])
 			pos += 2
 
 			// Extended capability flags (upper 2 bytes)
 			if pos+2 <= len(data) {
-				packet.ServerCapabilities |= uint64(protocol.GetUint16(data[pos:])) << 16
+				packet.ServerCapabilities |= uint64(binary.LittleEndian.Uint16(data[pos:])) << 16
 				pos += 2
 
 				// Auth plugin data length
@@ -141,12 +134,12 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 
 	// Client capabilities (4 bytes) - lower 32 bits
 	capBytes := make([]byte, 4)
-	protocol.PutUint32(capBytes, uint32(clientCaps))
+	binary.LittleEndian.PutUint32(capBytes, uint32(clientCaps))
 	buf.Write(capBytes)
 
 	// Max packet size (4 bytes) - 1GB
 	maxPacketBytes := make([]byte, 4)
-	protocol.PutUint32(maxPacketBytes, 1024*1024*1024)
+	binary.LittleEndian.PutUint32(maxPacketBytes, 1024*1024*1024)
 	buf.Write(maxPacketBytes)
 
 	// Character set (1 byte) - utf8mb4
@@ -157,7 +150,7 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 
 	// Extended client capabilities (4 bytes) - upper 32 bits (MariaDB extended)
 	extCapBytes := make([]byte, 4)
-	protocol.PutUint32(extCapBytes, uint32(clientCaps>>32))
+	binary.LittleEndian.PutUint32(extCapBytes, uint32(clientCaps>>32))
 	buf.Write(extCapBytes)
 
 	// Username (null-terminated)

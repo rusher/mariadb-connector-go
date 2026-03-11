@@ -32,7 +32,7 @@ func (r *Rows) current() *protocol.Completion {
 }
 
 // cols returns the columns of the current completion
-func (r *Rows) cols() []*protocol.ColumnDefinition {
+func (r *Rows) cols() []protocol.ColumnDefinition {
 	if c := r.current(); c != nil {
 		return c.Columns
 	}
@@ -67,8 +67,6 @@ func (r *Rows) Close() error {
 	// Drain the last completion if it still has rows on the wire
 	last := r.lastCompletion()
 	if last != nil && (!last.Loaded || (last.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0)) && r.conn != nil && !r.conn.client.IsClosed() {
-		r.conn.client.Lock()
-		defer r.conn.client.Unlock()
 		_, _ = r.conn.client.ReadRemainingRows(last)
 	}
 
@@ -123,9 +121,6 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 
 	// Fetch the next batch from the wire
-	r.conn.client.Lock()
-	defer r.conn.client.Unlock()
-
 	loaded, err := r.fetchCurrentRows(c)
 	if err != nil {
 		return err
@@ -342,7 +337,7 @@ func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	if index < 0 || index >= len(cols) {
 		return nil
 	}
-	return protocol.TypeToScanTypeWithColumn(cols[index])
+	return protocol.TypeToScanTypeWithColumn(&cols[index])
 }
 
 // IsClosed returns whether the rows are closed

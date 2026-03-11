@@ -10,6 +10,7 @@ package clientpkt
 
 import (
 	"database/sql/driver"
+	"encoding/binary"
 	"reflect"
 	"time"
 
@@ -104,7 +105,7 @@ func SetStmtID(buf []byte, stmtID uint32) {
 func NewStmtClose(stmtID uint32) []byte {
 	buf := make([]byte, hdrSize+5)
 	buf[hdrSize] = protocol.COM_STMT_CLOSE
-	protocol.PutUint32(buf[hdrSize+1:], stmtID)
+	binary.LittleEndian.PutUint32(buf[hdrSize+1:], stmtID)
 	return buf
 }
 

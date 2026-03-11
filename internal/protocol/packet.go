@@ -19,8 +19,9 @@ const hdrSize = HdrSize
 // PacketReader reads MySQL protocol packets
 type PacketReader struct {
 	reader   io.Reader
-	sequence *uint8 // Shared sequence pointer
-	logger   Logger // Debug logger
+	sequence *uint8  // Shared sequence pointer
+	logger   Logger  // Debug logger
+	hdr      [4]byte // reused per-call to avoid per-read heap allocation
 }
 
 // NewPacketReader creates a new PacketReader with shared sequence
@@ -34,17 +35,15 @@ func NewPacketReader(r io.Reader, seq *uint8) *PacketReader {
 
 // ReadPacket reads a single packet from the connection
 func (pr *PacketReader) ReadPacket() ([]byte, error) {
-	// Read packet header (3 bytes length + 1 byte sequence)
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(pr.reader, header); err != nil {
+	if _, err := io.ReadFull(pr.reader, pr.hdr[:]); err != nil {
 		return nil, fmt.Errorf("failed to read packet header: %w", err)
 	}
 
 	// Parse packet length (first 3 bytes, little-endian)
-	length := int(header[0]) | int(header[1])<<8 | int(header[2])<<16
+	length := int(pr.hdr[0]) | int(pr.hdr[1])<<8 | int(pr.hdr[2])<<16
 
 	// Verify sequence number
-	sequence := header[3]
+	sequence := pr.hdr[3]
 	if sequence != *pr.sequence {
 		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", *pr.sequence, sequence)
 	}
@@ -91,8 +90,9 @@ func (pr *PacketReader) ResetSequence() {
 // PacketWriter writes MySQL protocol packets
 type PacketWriter struct {
 	writer   io.Writer
-	sequence *uint8 // Shared sequence pointer
-	logger   Logger // Debug logger
+	sequence *uint8  // Shared sequence pointer
+	logger   Logger  // Debug logger
+	hdr      [4]byte // reused per-call to avoid per-write heap allocation
 }
 
 // NewPacketWriter creates a new PacketWriter with shared sequence
@@ -117,14 +117,9 @@ func (pw *PacketWriter) WritePacket(data []byte) error {
 
 	// Handle empty packet case - must still send a packet with 0 length
 	if dataLen == 0 {
-		header := make([]byte, 4)
-		header[0] = 0
-		header[1] = 0
-		header[2] = 0
-		header[3] = *pw.sequence
+		pw.hdr = [4]byte{0, 0, 0, *pw.sequence}
 		*pw.sequence++
-
-		if _, err := pw.writer.Write(header); err != nil {
+		if _, err := pw.writer.Write(pw.hdr[:]); err != nil {
 			return fmt.Errorf("failed to write empty packet header: %w", err)
 		}
 		return nil
@@ -132,26 +127,21 @@ func (pw *PacketWriter) WritePacket(data []byte) error {
 
 	// Split into multiple packets if necessary
 	for dataLen > 0 {
-		// Determine chunk size
 		chunkSize := dataLen
 		if chunkSize > MaxPacketSize {
 			chunkSize = MaxPacketSize
 		}
 
-		// Build packet header
-		header := make([]byte, 4)
-		header[0] = byte(chunkSize)
-		header[1] = byte(chunkSize >> 8)
-		header[2] = byte(chunkSize >> 16)
-		header[3] = *pw.sequence
+		pw.hdr[0] = byte(chunkSize)
+		pw.hdr[1] = byte(chunkSize >> 8)
+		pw.hdr[2] = byte(chunkSize >> 16)
+		pw.hdr[3] = *pw.sequence
 		*pw.sequence++
 
-		// Write header
-		if _, err := pw.writer.Write(header); err != nil {
+		if _, err := pw.writer.Write(pw.hdr[:]); err != nil {
 			return fmt.Errorf("failed to write packet header: %w", err)
 		}
 
-		// Write data chunk
 		offset := len(data) - dataLen
 		if _, err := pw.writer.Write(data[offset : offset+chunkSize]); err != nil {
 			return fmt.Errorf("failed to write packet data: %w", err)
@@ -159,16 +149,10 @@ func (pw *PacketWriter) WritePacket(data []byte) error {
 
 		dataLen -= chunkSize
 
-		// If we just sent exactly MaxPacketSize bytes, send an empty packet to indicate completion
 		if chunkSize == MaxPacketSize && dataLen == 0 {
-			header := make([]byte, 4)
-			header[0] = 0
-			header[1] = 0
-			header[2] = 0
-			header[3] = *pw.sequence
+			pw.hdr = [4]byte{0, 0, 0, *pw.sequence}
 			*pw.sequence++
-
-			if _, err := pw.writer.Write(header); err != nil {
+			if _, err := pw.writer.Write(pw.hdr[:]); err != nil {
 				return fmt.Errorf("failed to write terminating empty packet header: %w", err)
 			}
 		}
@@ -210,10 +194,6 @@ func (pw *PacketWriter) ResetSequence() {
 
 // ReadLengthEncodedInteger reads a length-encoded integer
 func ReadLengthEncodedInteger(data []byte, pos int) (uint64, int, error) {
-	if pos >= len(data) {
-		return 0, pos, fmt.Errorf("insufficient data for length-encoded integer")
-	}
-
 	first := data[pos]
 	pos++
 
@@ -222,23 +202,17 @@ func ReadLengthEncodedInteger(data []byte, pos int) (uint64, int, error) {
 		return uint64(first), pos, nil
 
 	case first == 0xfc:
-		if pos+2 > len(data) {
-			return 0, pos, fmt.Errorf("insufficient data for 2-byte length-encoded integer")
-		}
+		_ = data[pos+1]
 		val := uint64(data[pos]) | uint64(data[pos+1])<<8
 		return val, pos + 2, nil
 
 	case first == 0xfd:
-		if pos+3 > len(data) {
-			return 0, pos, fmt.Errorf("insufficient data for 3-byte length-encoded integer")
-		}
+		_ = data[pos+2]
 		val := uint64(data[pos]) | uint64(data[pos+1])<<8 | uint64(data[pos+2])<<16
 		return val, pos + 3, nil
 
 	case first == 0xfe:
-		if pos+8 > len(data) {
-			return 0, pos, fmt.Errorf("insufficient data for 8-byte length-encoded integer")
-		}
+		_ = data[pos+7]
 		val := binary.LittleEndian.Uint64(data[pos : pos+8])
 		return val, pos + 8, nil
 
@@ -253,11 +227,9 @@ func ReadLengthEncodedString(data []byte, pos int) (string, int, error) {
 	if err != nil {
 		return "", pos, err
 	}
-
-	if newPos+int(length) > len(data) {
-		return "", pos, fmt.Errorf("insufficient data for length-encoded string")
+	if length > 0 {
+		_ = data[newPos+int(length)-1]
 	}
-
 	str := string(data[newPos : newPos+int(length)])
 	return str, newPos + int(length), nil
 }
@@ -300,29 +272,4 @@ func ReadNullTerminatedString(data []byte, pos int) (string, int, error) {
 	}
 
 	return string(data[start:pos]), pos + 1, nil
-}
-
-// Helper functions for reading/writing integers
-func GetUint16(data []byte) uint16 {
-	return binary.LittleEndian.Uint16(data)
-}
-
-func GetUint32(data []byte) uint32 {
-	return binary.LittleEndian.Uint32(data)
-}
-
-func GetUint64(data []byte) uint64 {
-	return binary.LittleEndian.Uint64(data)
-}
-
-func PutUint16(data []byte, value uint16) {
-	binary.LittleEndian.PutUint16(data, value)
-}
-
-func PutUint32(data []byte, value uint32) {
-	binary.LittleEndian.PutUint32(data, value)
-}
-
-func PutUint64(data []byte, value uint64) {
-	binary.LittleEndian.PutUint64(data, value)
 }

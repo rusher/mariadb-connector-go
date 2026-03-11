@@ -22,9 +22,7 @@ func (e *MySQLError) Error() string {
 
 // ParseErrorPacket parses an error packet from raw bytes and returns it as an error
 func ParseErrorPacket(data []byte) error {
-	if len(data) < 3 {
-		return fmt.Errorf("error packet too short")
-	}
+	_ = data[2]
 
 	if data[0] != 0xff {
 		return fmt.Errorf("not an error packet")

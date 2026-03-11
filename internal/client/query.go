@@ -69,18 +69,16 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 			return nil, fmt.Errorf("failed to read column count: %w", err)
 		}
 
-		// Read column definitions
-		columns := make([]*protocol.ColumnDefinition, columnCount)
+		// Read column definitions — value slice: one allocation for all N columns.
+		columns := make([]protocol.ColumnDefinition, columnCount)
 		for i := 0; i < int(columnCount); i++ {
 			colData, err := c.reader.ReadPacket()
 			if err != nil {
 				return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 			}
-			col, err := protocol.ParseColumnDefinition(colData)
-			if err != nil {
+			if err := protocol.FillColumnDefinition(colData, &columns[i]); err != nil {
 				return nil, fmt.Errorf("failed to parse column %d: %w", i, err)
 			}
-			columns[i] = col
 		}
 
 		// Read EOF after column definitions (if not CLIENT_DEPRECATE_EOF)
@@ -98,6 +96,8 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 		}
 		rows := make([][]byte, 0, capHint)
 
+		// Pre-allocate the completion for the terminating EOF/OK packet.
+		comp := protocol.Completion{}
 		var completion *protocol.Completion
 		for i := 0; fetchSize == 0 || i < fetchSize; i++ {
 			rowData, err := c.reader.ReadPacket()
@@ -109,16 +109,17 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 				return nil, server.ParseErrorPacket(rowData)
 			}
 
-			// End of rows: use the terminating packet as the Completion base
+			// End of rows: fill the pre-allocated completion.
 			if len(rowData) > 0 && rowData[0] == 0xfe && len(rowData) < 0xffffff {
 				if c.context.IsEOFDeprecated() {
-					completion, err = server.ParseOkPacket(rowData, c.context)
+					err = server.FillOkPacket(rowData, c.context, &comp)
 				} else {
-					completion, err = server.ParseEOFPacket(rowData, c.context)
+					err = server.FillEOFPacket(rowData, c.context, &comp)
 				}
 				if err != nil {
 					return nil, err
 				}
+				completion = &comp
 				break
 			}
 
@@ -127,7 +128,7 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 
 		if completion == nil {
 			// Hit fetchSize limit without reaching EOF — still streaming
-			completion = &protocol.Completion{}
+			completion = &comp
 		} else {
 			completion.Loaded = true
 		}
@@ -186,8 +187,12 @@ func (c *Client) ReadRemainingRows(completion *protocol.Completion) ([]*protocol
 }
 
 // Query executes a query and returns a list of completions (supports multi-resultset).
-// Must be called with client mutex locked.
 func (c *Client) Query(ctx context.Context, query string) ([]*protocol.Completion, error) {
+	stop, err := c.WithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stop()
 	if err := c.bufferActiveRows(); err != nil {
 		return nil, err
 	}
@@ -199,8 +204,12 @@ func (c *Client) Query(ctx context.Context, query string) ([]*protocol.Completio
 }
 
 // Exec executes a command and returns a list of completions (supports multi-resultset).
-// Must be called with client mutex locked.
 func (c *Client) Exec(ctx context.Context, query string) ([]*protocol.Completion, error) {
+	stop, err := c.WithContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer stop()
 	if err := c.bufferActiveRows(); err != nil {
 		return nil, err
 	}

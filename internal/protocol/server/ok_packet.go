@@ -15,9 +15,7 @@ type ContextUpdater interface {
 
 // ParseOkPacket parses an OK packet from raw bytes into a Completion and updates context
 func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error) {
-	if len(data) < 7 {
-		return nil, protocol.ErrMalformedPacket
-	}
+	_ = data[6]
 
 	pos := 1 // Skip 0x00 or 0xFE header
 
@@ -33,9 +31,7 @@ func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error
 	}
 	pos = newPos
 
-	if pos+4 > len(data) {
-		return nil, protocol.ErrMalformedPacket
-	}
+	_ = data[pos+3]
 	serverStatus := uint16(data[pos]) | uint16(data[pos+1])<<8
 	pos += 2
 	warningCount := uint16(data[pos]) | uint16(data[pos+1])<<8
@@ -46,7 +42,38 @@ func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error
 		ctx.SetWarningCount(int(warningCount))
 	}
 
-	completion := &protocol.Completion{
+	completion := &protocol.Completion{}
+	return completion, fillOkPacket(data, ctx, pos, affectedRows, lastInsertId, serverStatus, warningCount, completion)
+}
+
+// FillOkPacket parses an OK packet into a pre-allocated Completion.
+func FillOkPacket(data []byte, ctx ContextUpdater, completion *protocol.Completion) error {
+	_ = data[6]
+	pos := 1
+	affectedRows, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	if err != nil {
+		return err
+	}
+	pos = newPos
+	lastInsertId, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	if err != nil {
+		return err
+	}
+	pos = newPos
+	_ = data[pos+3]
+	serverStatus := uint16(data[pos]) | uint16(data[pos+1])<<8
+	pos += 2
+	warningCount := uint16(data[pos]) | uint16(data[pos+1])<<8
+	pos += 2
+	if ctx != nil {
+		ctx.SetServerStatus(serverStatus)
+		ctx.SetWarningCount(int(warningCount))
+	}
+	return fillOkPacket(data, ctx, pos, affectedRows, lastInsertId, serverStatus, warningCount, completion)
+}
+
+func fillOkPacket(data []byte, ctx ContextUpdater, pos int, affectedRows, lastInsertId uint64, serverStatus, warningCount uint16, completion *protocol.Completion) error {
+	*completion = protocol.Completion{
 		AffectedRows: int64(affectedRows),
 		InsertID:     int64(lastInsertId),
 		ServerStatus: serverStatus,
@@ -73,8 +100,7 @@ func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error
 			}
 		}
 	}
-
-	return completion, nil
+	return nil
 }
 
 // parseSessionState parses session state changes and updates context

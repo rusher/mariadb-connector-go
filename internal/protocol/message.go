@@ -29,7 +29,7 @@ type Completion struct {
 	Message      string
 
 	// Populated for result sets
-	Columns []*ColumnDefinition
+	Columns []ColumnDefinition
 	Binary  bool
 	Rows    [][]byte // pre-fetched row packets
 	Loaded  bool     // true if all row packets are in memory (false = still streaming)

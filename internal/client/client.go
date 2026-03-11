@@ -4,10 +4,12 @@
 package client
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"net"
-	"sync"
+	"time"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
@@ -29,7 +31,42 @@ type Client struct {
 	activeRows interface{} // Currently active streaming result set (type will be *Rows from parent package)
 
 	closed bool
-	mu     sync.Mutex
+}
+
+// pastDeadline is used to immediately expire any pending network I/O.
+var pastDeadline = time.Unix(1, 0)
+
+// WithContext starts a watchdog goroutine that cancels pending network I/O
+// by setting a past deadline when ctx is done. The returned stop function
+// must always be called (e.g. via defer). It is a no-op when ctx can never
+// be cancelled (ctx.Done() == nil, e.g. context.Background).
+func (c *Client) WithContext(ctx context.Context) (func(), error) {
+	if ctx.Done() == nil {
+		return func() {}, nil
+	}
+	select {
+	case <-ctx.Done():
+		return func() {}, ctx.Err()
+	default:
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			c.netConn.SetDeadline(pastDeadline)
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		if ctx.Err() != nil {
+			// Connection state is indeterminate after a mid-I/O cancellation.
+			c.closed = true
+			c.netConn.Close()
+		} else {
+			c.netConn.SetDeadline(time.Time{})
+		}
+	}, nil
 }
 
 // NewClient creates a new client instance
@@ -41,9 +78,6 @@ func NewClient(config *Config) *Client {
 
 // Connect establishes the network connection and performs handshake
 func (c *Client) Connect(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	var err error
 
 	// Establish network connection
@@ -74,9 +108,11 @@ func (c *Client) Connect(ctx context.Context) error {
 		protocol.SetLogger(protocol.NewDebugLogger(true))
 	}
 
-	// Initialize packet reader/writer with shared sequence
+	// Initialize packet reader/writer with shared sequence.
+	// The reader is wrapped in a 64 KB bufio.Reader to batch kernel reads:
+	// without buffering, every ReadPacket call makes two syscalls (header + data).
 	c.sequence = 0
-	c.reader = protocol.NewPacketReader(c.netConn, &c.sequence)
+	c.reader = protocol.NewPacketReader(bufio.NewReaderSize(c.netConn, 65536), &c.sequence)
 	c.writer = protocol.NewPacketWriter(c.netConn, &c.sequence)
 
 	// Perform handshake
@@ -217,9 +253,9 @@ func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, column
 		return 0, 0, 0, fmt.Errorf("unexpected COM_STMT_PREPARE response (first byte: 0x%02x)", response[0])
 	}
 
-	stmtID = protocol.GetUint32(response[1:])
-	columnCount = protocol.GetUint16(response[5:])
-	paramCount = protocol.GetUint16(response[7:])
+	stmtID = binary.LittleEndian.Uint32(response[1:])
+	columnCount = binary.LittleEndian.Uint16(response[5:])
+	paramCount = binary.LittleEndian.Uint16(response[7:])
 
 	for i := 0; i < int(paramCount); i++ {
 		if _, err = c.reader.ReadPacket(); err != nil {
@@ -247,22 +283,17 @@ func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, column
 }
 
 // ReadPacket reads a packet from the server.
-// Must be called with client mutex locked.
 func (c *Client) ReadPacket() ([]byte, error) {
 	return c.reader.ReadPacket()
 }
 
 // WritePacket writes a raw (no header reservation) packet to the server.
-// Must be called with client mutex locked.
 func (c *Client) WritePacket(data []byte) error {
 	return c.writer.WritePacket(data)
 }
 
 // Close closes the client connection
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
 		return nil
 	}
@@ -302,27 +333,18 @@ func (c *Client) Writer() *protocol.PacketWriter {
 	return c.writer
 }
 
-// Lock locks the client mutex
-func (c *Client) Lock() {
-	c.mu.Lock()
-}
-
-// Unlock unlocks the client mutex
-func (c *Client) Unlock() {
-	c.mu.Unlock()
-}
-
 // Sequence returns a pointer to the sequence number
 func (c *Client) Sequence() *uint8 {
 	return &c.sequence
 }
 
 // ExecInternal executes a query without returning results.
-// Acquires its own lock — use only when the caller does NOT already hold it.
 func (c *Client) ExecInternal(ctx context.Context, query string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	stop, err := c.WithContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer stop()
 	c.sequence = 0
 	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
 		return err

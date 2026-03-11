@@ -271,12 +271,13 @@ func (p *CachingSha2Plugin) ContinuationAuth(packet []byte, authData []byte, cfg
 		if cfg.TLS != nil || cfg.TLSConfig != "" {
 			return append([]byte(cfg.Passwd), 0), true, nil
 		}
-		// Use the server public key directly (it's already *rsa.PublicKey)
-		encrypted, err := encryptPassword(cfg.Passwd, authData, cfg.ServerPublicKey)
-		if err != nil {
-			return nil, false, err
+		if cfg.ServerPublicKey != nil {
+			encrypted, err := encryptPassword(cfg.Passwd, authData, cfg.ServerPublicKey)
+			if err != nil {
+				return nil, false, err
+			}
+			return encrypted, true, nil
 		}
-		return encrypted, true, nil
 		if !cfg.AllowPublicKeyRetrieval {
 			return nil, false, fmt.Errorf("caching_sha2_password requires either TLS or server public key. Enable AllowPublicKeyRetrieval=true to retrieve the public key from the server, or provide ServerPubKey in the connection string")
 		}
