@@ -58,6 +58,12 @@ func (c *Context) GetServerVersion() string {
 	return c.internal.GetServerVersion()
 }
 
+// CanPipelinePrepare reports whether pipelined COM_STMT_PREPARE+COM_STMT_EXECUTE
+// is supported (MariaDB STMT_BULK_OPERATIONS capability).
+func (c *Context) CanPipelinePrepare() bool {
+	return c.internal.CanPipelinePrepare()
+}
+
 // IsEOFDeprecated returns whether EOF packets are deprecated
 func (c *Context) IsEOFDeprecated() bool {
 	return c.internal.IsEOFDeprecated()

@@ -4,7 +4,6 @@
 package protocol
 
 import (
-	"database/sql/driver"
 	"fmt"
 	"math"
 	"reflect"
@@ -198,10 +197,16 @@ func TypeToString(t byte) string {
 	}
 }
 
-// TypeToScanType returns the Go type that can be used to scan this column type
-func TypeToScanType(t byte) reflect.Type {
-	switch t {
-	case MYSQL_TYPE_TINY, MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24:
+// TypeToScanTypeWithColumn returns the Go type that can be used to scan this column
+// This version takes the full column definition to handle TINYINT(1) as bool
+func TypeToScanTypeWithColumn(col *ColumnDefinition) reflect.Type {
+	switch col.Type {
+	case MYSQL_TYPE_TINY:
+		if col.Length == 1 {
+			return reflect.TypeOf(false)
+		}
+		return reflect.TypeOf(int64(0))
+	case MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24:
 		return reflect.TypeOf(int64(0))
 	case MYSQL_TYPE_LONGLONG:
 		return reflect.TypeOf(int64(0))
@@ -256,8 +261,14 @@ func ParseTextRow(data []byte, columns []*ColumnDefinition) ([]interface{}, erro
 		}
 		pos = newPos
 
-		// Convert string to appropriate type
-		values[i] = str
+		// Convert TINYINT(1) to bool
+		if columns[i].Type == MYSQL_TYPE_TINY && columns[i].Length == 1 {
+			// In text protocol, TINYINT values come as "0" or "1" strings
+			values[i] = str != "0" && str != ""
+		} else {
+			// Convert string to appropriate type
+			values[i] = str
+		}
 	}
 
 	return values, nil
@@ -293,7 +304,7 @@ func ParseBinaryRow(data []byte, columns []*ColumnDefinition) ([]interface{}, er
 
 		// Read value based on type
 		var err error
-		values[i], pos, err = readBinaryValue(data, pos, col.Type, col.Flags)
+		values[i], pos, err = readBinaryValue(data, pos, col)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 		}
@@ -303,26 +314,29 @@ func ParseBinaryRow(data []byte, columns []*ColumnDefinition) ([]interface{}, er
 }
 
 // readBinaryValue reads a single value in binary protocol
-func readBinaryValue(data []byte, pos int, fieldType byte, flags uint16) (interface{}, int, error) {
+func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, int, error) {
 	if pos >= len(data) {
 		return nil, pos, fmt.Errorf("insufficient data")
 	}
 
-	unsigned := flags&UNSIGNED_FLAG != 0
-
-	switch fieldType {
+	switch col.Type {
 	case MYSQL_TYPE_TINY:
-		if unsigned {
-			return uint64(data[pos]), pos + 1, nil
+		val := data[pos]
+		// TINYINT(1) is treated as bool
+		if col.Length == 1 {
+			return val != 0, pos + 1, nil
 		}
-		return int64(int8(data[pos])), pos + 1, nil
+		if col.Flags&UNSIGNED_FLAG != 0 {
+			return uint64(val), pos + 1, nil
+		}
+		return int64(int8(val)), pos + 1, nil
 
 	case MYSQL_TYPE_SHORT, MYSQL_TYPE_YEAR:
 		if pos+2 > len(data) {
 			return nil, pos, fmt.Errorf("insufficient data for SHORT")
 		}
 		val := GetUint16(data[pos:])
-		if unsigned {
+		if col.Flags&UNSIGNED_FLAG != 0 {
 			return uint64(val), pos + 2, nil
 		}
 		return int64(int16(val)), pos + 2, nil
@@ -332,7 +346,7 @@ func readBinaryValue(data []byte, pos int, fieldType byte, flags uint16) (interf
 			return nil, pos, fmt.Errorf("insufficient data for LONG")
 		}
 		val := GetUint32(data[pos:])
-		if unsigned {
+		if col.Flags&UNSIGNED_FLAG != 0 {
 			return uint64(val), pos + 4, nil
 		}
 		return int64(int32(val)), pos + 4, nil
@@ -342,7 +356,7 @@ func readBinaryValue(data []byte, pos int, fieldType byte, flags uint16) (interf
 			return nil, pos, fmt.Errorf("insufficient data for LONGLONG")
 		}
 		val := GetUint64(data[pos:])
-		if unsigned {
+		if col.Flags&UNSIGNED_FLAG != 0 {
 			return val, pos + 8, nil
 		}
 		return int64(val), pos + 8, nil
@@ -460,131 +474,12 @@ func readBinaryValue(data []byte, pos int, fieldType byte, flags uint16) (interf
 		return str, newPos, nil
 
 	default:
-		return nil, pos, fmt.Errorf("unsupported field type: %d", fieldType)
+		return nil, pos, fmt.Errorf("unsupported field type: %d", col.Type)
 	}
 }
 
-// BuildStmtExecutePacket builds a COM_STMT_EXECUTE packet
-func BuildStmtExecutePacket(stmtID uint32, args interface{}) ([]byte, error) {
-	// Convert args to slice of interface{}
-	var argSlice []interface{}
-	switch v := args.(type) {
-	case []interface{}:
-		argSlice = v
-	default:
-		// Handle driver.NamedValue slice
-		if namedValues, ok := args.([]driver.NamedValue); ok {
-			argSlice = make([]interface{}, len(namedValues))
-			for i, nv := range namedValues {
-				argSlice[i] = nv.Value
-			}
-		}
-	}
-	// This is a simplified implementation
-	// A full implementation would properly encode all parameter types
-
-	packet := make([]byte, 0, 1024)
-
-	// Command byte
-	packet = append(packet, COM_STMT_EXECUTE)
-
-	// Statement ID (4 bytes)
-	stmtIDBytes := make([]byte, 4)
-	PutUint32(stmtIDBytes, stmtID)
-	packet = append(packet, stmtIDBytes...)
-
-	// Flags (1 byte) - CURSOR_TYPE_NO_CURSOR
-	packet = append(packet, 0x00)
-
-	// Iteration count (4 bytes) - always 1
-	packet = append(packet, 0x01, 0x00, 0x00, 0x00)
-
-	if len(argSlice) > 0 {
-		// NULL bitmap
-		nullBitmapLen := (len(argSlice) + 7) / 8
-		nullBitmap := make([]byte, nullBitmapLen)
-
-		for i, arg := range argSlice {
-			isNull := arg == nil
-			if !isNull {
-				v := reflect.ValueOf(arg)
-				// IsNil can only be called on certain types
-				switch v.Kind() {
-				case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
-					isNull = v.IsNil()
-				}
-			}
-			if isNull {
-				bytePos := i / 8
-				bitPos := i % 8
-				nullBitmap[bytePos] |= 1 << bitPos
-			}
-		}
-		packet = append(packet, nullBitmap...)
-
-		// New params bound flag (1 byte) - always 1
-		packet = append(packet, 0x01)
-
-		// Parameter types (2 bytes each)
-		for _, arg := range argSlice {
-			fieldType, flags := getParamType(arg)
-			packet = append(packet, fieldType, flags)
-		}
-
-		// Parameter values
-		for _, arg := range argSlice {
-			isNull := arg == nil
-			if !isNull {
-				v := reflect.ValueOf(arg)
-				// IsNil can only be called on certain types
-				switch v.Kind() {
-				case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
-					isNull = v.IsNil()
-				}
-			}
-			if isNull {
-				continue
-			}
-
-			valueBytes, err := encodeParamValue(arg)
-			if err != nil {
-				return nil, err
-			}
-			packet = append(packet, valueBytes...)
-		}
-	}
-
-	return packet, nil
-}
-
-// getParamType determines the MySQL type for a parameter
-func getParamType(arg interface{}) (byte, byte) {
-	if arg == nil {
-		return MYSQL_TYPE_NULL, 0
-	}
-
-	switch arg.(type) {
-	case int, int8, int16, int32, int64:
-		return MYSQL_TYPE_LONGLONG, 0
-	case uint, uint8, uint16, uint32, uint64:
-		return MYSQL_TYPE_LONGLONG, 0x80 // UNSIGNED
-	case float32:
-		return MYSQL_TYPE_FLOAT, 0
-	case float64:
-		return MYSQL_TYPE_DOUBLE, 0
-	case string:
-		return MYSQL_TYPE_VAR_STRING, 0
-	case []byte:
-		return MYSQL_TYPE_BLOB, 0
-	case time.Time:
-		return MYSQL_TYPE_DATETIME, 0
-	default:
-		return MYSQL_TYPE_VAR_STRING, 0
-	}
-}
-
-// encodeParamValue encodes a parameter value
-func encodeParamValue(arg interface{}) ([]byte, error) {
+// EncodeParamValue encodes a parameter value for a binary protocol packet.
+func EncodeParamValue(arg interface{}) ([]byte, error) {
 	switch v := arg.(type) {
 	case string:
 		return WriteLengthEncodedString(nil, v), nil

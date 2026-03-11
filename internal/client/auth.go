@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
@@ -42,7 +41,7 @@ func (c *Client) handleAuthResult(data []byte, initialSeed []byte, initialPlugin
 
 		case iERR:
 			// Error packet
-			return protocol.ParseErrorPacket(data)
+			return server.ParseErrorPacket(data)
 
 		case iEOF:
 			// Auth switch request

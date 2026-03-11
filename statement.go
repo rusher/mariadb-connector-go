@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
+	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
 )
 
 // Stmt implements driver.Stmt interface
@@ -34,13 +35,8 @@ func (s *Stmt) Close() error {
 		return driver.ErrBadConn
 	}
 
-	// Send COM_STMT_CLOSE
-	packet := make([]byte, 5)
-	packet[0] = protocol.COM_STMT_CLOSE
-	protocol.PutUint32(packet[1:], s.stmtID)
-
 	// COM_STMT_CLOSE doesn't send a response
-	return s.conn.client.SendCommand(packet)
+	return s.conn.client.Send(clientpkt.NewStmtClose(s.stmtID))
 }
 
 // NumInput returns the number of placeholder parameters
@@ -66,36 +62,35 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 		return nil, driver.ErrBadConn
 	}
 
-	// Prepare statement if not already prepared
+	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
+	if err != nil {
+		return nil, err
+	}
+
 	if !s.prepared {
-		if err := s.prepareInternal(); err != nil {
+		if err := s.prepareAndExecute(execPkt); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.conn.client.Send(execPkt); err != nil {
 			return nil, err
 		}
 	}
 
-	// Build COM_STMT_EXECUTE packet
-	packet, err := protocol.BuildStmtExecutePacket(s.stmtID, args)
+	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
 	if err != nil {
 		return nil, err
 	}
 
-	// Send command (resets sequence)
-	if err := s.conn.client.SendCommand(packet); err != nil {
-		return nil, err
+	var result *protocol.Completion
+	for _, comp := range completions {
+		if !comp.HasResultSet() {
+			result = comp
+		}
 	}
-
-	// Read response
-	response, err := s.conn.client.Reader().ReadPacket()
-	if err != nil {
-		return nil, err
+	if result == nil {
+		result = &protocol.Completion{}
 	}
-
-	// Parse result
-	result, err := protocol.ParseResultPacket(response)
-	if err != nil {
-		return nil, err
-	}
-
 	return result, nil
 }
 
@@ -113,148 +108,84 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 		return nil, driver.ErrBadConn
 	}
 
-	// Prepare statement if not already prepared
+	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
+	if err != nil {
+		return nil, err
+	}
+
 	if !s.prepared {
-		if err := s.prepareInternal(); err != nil {
+		if err := s.prepareAndExecute(execPkt); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.conn.client.Send(execPkt); err != nil {
 			return nil, err
 		}
 	}
 
-	// Build COM_STMT_EXECUTE packet
-	packet, err := protocol.BuildStmtExecutePacket(s.stmtID, args)
+	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
 	if err != nil {
 		return nil, err
 	}
 
-	// Send command (resets sequence)
-	if err := s.conn.client.SendCommand(packet); err != nil {
-		return nil, err
-	}
-
-	// Read column count or result
-	columnCountData, err := s.conn.client.Reader().ReadPacket()
-	if err != nil {
-		return nil, err
-	}
-
-	// Check for error
-	if len(columnCountData) > 0 && columnCountData[0] == 0xff {
-		return nil, protocol.ParseErrorPacket(columnCountData)
-	}
-
-	// Check for OK packet (no result set)
-	if len(columnCountData) > 0 && columnCountData[0] == 0x00 {
-		return &Rows{columns: []*protocol.ColumnDefinition{}, binary: true}, nil
-	}
-
-	// Parse column count
-	columnCount, _, err := protocol.ReadLengthEncodedInteger(columnCountData, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read column definitions
-	columns := make([]*protocol.ColumnDefinition, columnCount)
-	for i := 0; i < int(columnCount); i++ {
-		colData, err := s.conn.client.Reader().ReadPacket()
-		if err != nil {
-			return nil, err
-		}
-
-		col, err := protocol.ParseColumnDefinition(colData)
-		if err != nil {
-			return nil, err
-		}
-		columns[i] = col
-	}
-
-	// Read EOF packet (if not using CLIENT_DEPRECATE_EOF)
-	if !s.conn.context.IsEOFDeprecated() {
-		_, err := s.conn.client.Reader().ReadPacket()
-		if err != nil {
-			return nil, err
+	// Error if no completion returned a result set
+	hasResultSet := false
+	for _, comp := range completions {
+		if comp.HasResultSet() {
+			hasResultSet = true
+			break
 		}
 	}
+	if !hasResultSet {
+		return nil, fmt.Errorf("query did not return a result set")
+	}
 
-	return &Rows{
-		conn:    s.conn,
-		columns: columns,
-		binary:  true,
-	}, nil
+	rows := &Rows{
+		conn:        s.conn,
+		completions: completions,
+	}
+	if !completions[0].Loaded {
+		s.conn.client.SetActiveRows(rows)
+	}
+	return rows, nil
 }
 
-// prepareInternal prepares the statement (must be called with conn.mu locked)
+// prepareInternal sends COM_STMT_PREPARE and reads the server response.
+// Must be called with conn.mu locked.
 func (s *Stmt) prepareInternal() error {
-	// Build COM_STMT_PREPARE packet
-	packet := make([]byte, 1+len(s.query))
-	packet[0] = protocol.COM_STMT_PREPARE
-	copy(packet[1:], s.query)
-
-	// Send command (resets sequence)
-	if err := s.conn.client.SendCommand(packet); err != nil {
+	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
 		return err
 	}
-
-	// Read response
-	response, err := s.conn.client.Reader().ReadPacket()
+	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
 	if err != nil {
 		return err
 	}
+	s.stmtID = stmtID
+	s.paramCount = paramCount
+	s.columnCount = columnCount
+	s.prepared = true
+	return nil
+}
 
-	// Check for error
-	if len(response) > 0 && response[0] == 0xff {
-		return protocol.ParseErrorPacket(response)
+// prepareAndExecute pipelines COM_STMT_PREPARE + COM_STMT_EXECUTE using
+// stmtID=0xFFFFFFFF as the sentinel value (MariaDB STMT_BULK_OPERATIONS).
+// Only called when CanPipelinePrepare() is true.
+// Must be called with conn.mu locked.
+func (s *Stmt) prepareAndExecute(execPkt []byte) error {
+	clientpkt.SetStmtID(execPkt, 0xFFFFFFFF)
+	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
+		return err
 	}
-
-	// Parse prepare OK packet
-	if len(response) < 12 {
-		return fmt.Errorf("invalid prepare response")
+	if err := s.conn.client.SendNext(execPkt); err != nil {
+		return err
 	}
-
-	if response[0] != 0x00 {
-		return fmt.Errorf("unexpected prepare response")
+	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
+	if err != nil {
+		return err
 	}
-
-	s.stmtID = protocol.GetUint32(response[1:])
-	s.columnCount = protocol.GetUint16(response[5:])
-	s.paramCount = protocol.GetUint16(response[7:])
-
-	// Read parameter definitions if any
-	if s.paramCount > 0 {
-		for i := 0; i < int(s.paramCount); i++ {
-			_, err := s.conn.client.Reader().ReadPacket()
-			if err != nil {
-				return err
-			}
-		}
-
-		// Read EOF packet (if not using CLIENT_DEPRECATE_EOF)
-		if !s.conn.context.IsEOFDeprecated() {
-			_, err := s.conn.client.Reader().ReadPacket()
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	// Read column definitions if any
-	if s.columnCount > 0 {
-		for i := 0; i < int(s.columnCount); i++ {
-			_, err := s.conn.client.Reader().ReadPacket()
-			if err != nil {
-				return err
-			}
-		}
-
-		// Read EOF packet (if not using CLIENT_DEPRECATE_EOF)
-		if !s.conn.context.IsEOFDeprecated() {
-			_, err := s.conn.client.Reader().ReadPacket()
-			if err != nil {
-				return err
-			}
-		}
-	}
-
+	s.stmtID = stmtID
+	s.paramCount = paramCount
+	s.columnCount = columnCount
 	s.prepared = true
 	return nil
 }

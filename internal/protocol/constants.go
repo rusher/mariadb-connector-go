@@ -166,6 +166,17 @@ const (
 	MYSQL_TYPE_GEOMETRY    = 0xff
 )
 
+// Session state change types
+// See https://mariadb.com/kb/en/ok_packet/#session-state-information
+const (
+	SESSION_TRACK_SYSTEM_VARIABLES            byte = 0x00
+	SESSION_TRACK_SCHEMA                      byte = 0x01
+	SESSION_TRACK_STATE_CHANGE                byte = 0x02
+	SESSION_TRACK_GTIDS                       byte = 0x03
+	SESSION_TRACK_TRANSACTION_CHARACTERISTICS byte = 0x04
+	SESSION_TRACK_TRANSACTION_STATE           byte = 0x05
+)
+
 // Character sets
 const (
 	CHARSET_UTF8MB4 = 45

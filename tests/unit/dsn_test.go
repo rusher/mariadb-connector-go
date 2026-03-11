@@ -24,11 +24,11 @@ func TestParseDSN(t *testing.T) {
 				if cfg.User != "user" {
 					t.Errorf("User mismatch: got %q, want %q", cfg.User, "user")
 				}
-				if cfg.Password != "password" {
-					t.Errorf("Password mismatch: got %q, want %q", cfg.Password, "password")
+				if cfg.Passwd != "password" {
+					t.Errorf("Password mismatch: got %q, want %q", cfg.Passwd, "password")
 				}
-				if cfg.Protocol != "tcp" {
-					t.Errorf("Protocol mismatch: got %q, want %q", cfg.Protocol, "tcp")
+				if cfg.Net != "tcp" {
+					t.Errorf("Protocol mismatch: got %q, want %q", cfg.Net, "tcp")
 				}
 				if cfg.Host != "localhost" {
 					t.Errorf("Host mismatch: got %q, want %q", cfg.Host, "localhost")
@@ -36,8 +36,8 @@ func TestParseDSN(t *testing.T) {
 				if cfg.Port != 3306 {
 					t.Errorf("Port mismatch: got %d, want %d", cfg.Port, 3306)
 				}
-				if cfg.Database != "dbname" {
-					t.Errorf("Database mismatch: got %q, want %q", cfg.Database, "dbname")
+				if cfg.DBName != "dbname" {
+					t.Errorf("Database mismatch: got %q, want %q", cfg.DBName, "dbname")
 				}
 			},
 		},
@@ -60,8 +60,8 @@ func TestParseDSN(t *testing.T) {
 			name: "Unix socket",
 			dsn:  "user:password@unix(/var/run/mysqld/mysqld.sock)/dbname",
 			validate: func(t *testing.T, cfg *mariadb.Config) {
-				if cfg.Protocol != "unix" {
-					t.Errorf("Protocol mismatch: got %q, want %q", cfg.Protocol, "unix")
+				if cfg.Net != "unix" {
+					t.Errorf("Protocol mismatch: got %q, want %q", cfg.Net, "unix")
 				}
 				if cfg.Socket != "/var/run/mysqld/mysqld.sock" {
 					t.Errorf("Socket mismatch: got %q, want %q", cfg.Socket, "/var/run/mysqld/mysqld.sock")
@@ -122,8 +122,8 @@ func TestParseDSN(t *testing.T) {
 			name: "No database",
 			dsn:  "user:password@tcp(localhost:3306)/",
 			validate: func(t *testing.T, cfg *mariadb.Config) {
-				if cfg.Database != "" {
-					t.Errorf("Expected empty database, got %q", cfg.Database)
+				if cfg.DBName != "" {
+					t.Errorf("Expected empty database, got %q", cfg.DBName)
 				}
 			},
 		},
@@ -169,22 +169,22 @@ func TestFormatDSN(t *testing.T) {
 		{
 			name: "Simple TCP connection",
 			config: &mariadb.Config{
-				Protocol: "tcp",
-				Host:     "localhost",
-				Port:     3306,
-				User:     "user",
-				Password: "password",
-				Database: "dbname",
+				Net:    "tcp",
+				Host:   "localhost",
+				Port:   3306,
+				User:   "user",
+				Passwd: "password",
+				DBName: "dbname",
 			},
 			want: "user:password@tcp(localhost)/dbname",
 		},
 		{
 			name: "Unix socket",
 			config: &mariadb.Config{
-				Protocol: "unix",
-				Socket:   "/tmp/mysql.sock",
-				User:     "user",
-				Database: "dbname",
+				Net:    "unix",
+				Socket: "/tmp/mysql.sock",
+				User:   "user",
+				DBName: "dbname",
 			},
 			want: "user@unix(/tmp/mysql.sock)/dbname",
 		},
@@ -212,8 +212,8 @@ func TestFormatDSN(t *testing.T) {
 			if gotCfg.Host != wantCfg.Host {
 				t.Errorf("Host mismatch: got %q, want %q", gotCfg.Host, wantCfg.Host)
 			}
-			if gotCfg.Database != wantCfg.Database {
-				t.Errorf("Database mismatch: got %q, want %q", gotCfg.Database, wantCfg.Database)
+			if gotCfg.DBName != wantCfg.DBName {
+				t.Errorf("Database mismatch: got %q, want %q", gotCfg.DBName, wantCfg.DBName)
 			}
 		})
 	}
@@ -221,15 +221,15 @@ func TestFormatDSN(t *testing.T) {
 
 func TestConfigClone(t *testing.T) {
 	original := &mariadb.Config{
-		Protocol: "tcp",
-		Host:     "localhost",
-		Port:     3306,
-		User:     "user",
-		Password: "password",
-		Database: "dbname",
-		Timeout:  10 * time.Second,
-		Charset:  "utf8mb4",
-		Params:   map[string]string{"key": "value"},
+		Net:     "tcp",
+		Host:    "localhost",
+		Port:    3306,
+		User:    "user",
+		Passwd:  "password",
+		DBName:  "dbname",
+		Timeout: 10 * time.Second,
+		Charset: "utf8mb4",
+		Params:  map[string]string{"key": "value"},
 	}
 
 	clone := original.Clone()
@@ -265,14 +265,14 @@ func BenchmarkParseDSN(b *testing.B) {
 
 func BenchmarkFormatDSN(b *testing.B) {
 	cfg := &mariadb.Config{
-		Protocol: "tcp",
-		Host:     "localhost",
-		Port:     3306,
-		User:     "user",
-		Password: "password",
-		Database: "dbname",
-		Timeout:  10 * time.Second,
-		Charset:  "utf8mb4",
+		Net:     "tcp",
+		Host:    "localhost",
+		Port:    3306,
+		User:    "user",
+		Passwd:  "password",
+		DBName:  "dbname",
+		Timeout: 10 * time.Second,
+		Charset: "utf8mb4",
 	}
 
 	b.ResetTimer()

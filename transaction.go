@@ -7,7 +7,16 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"strings"
 )
+
+// escapeIdentifier escapes a SQL identifier by wrapping it in backticks
+// and escaping any backticks within the identifier by doubling them
+func escapeIdentifier(name string) string {
+	// Replace ` with ``
+	escaped := strings.ReplaceAll(name, "`", "``")
+	return "`" + escaped + "`"
+}
 
 // Tx implements driver.Tx interface
 type Tx struct {
@@ -47,7 +56,7 @@ func (tx *Tx) Savepoint(name string) error {
 		return driver.ErrBadConn
 	}
 
-	query := fmt.Sprintf("SAVEPOINT %s", name)
+	query := fmt.Sprintf("SAVEPOINT %s", escapeIdentifier(name))
 	return tx.conn.execInternal(context.Background(), query)
 }
 
@@ -60,7 +69,7 @@ func (tx *Tx) RollbackToSavepoint(name string) error {
 		return driver.ErrBadConn
 	}
 
-	query := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", name)
+	query := fmt.Sprintf("ROLLBACK TO SAVEPOINT %s", escapeIdentifier(name))
 	return tx.conn.execInternal(context.Background(), query)
 }
 
@@ -73,6 +82,6 @@ func (tx *Tx) ReleaseSavepoint(name string) error {
 		return driver.ErrBadConn
 	}
 
-	query := fmt.Sprintf("RELEASE SAVEPOINT %s", name)
+	query := fmt.Sprintf("RELEASE SAVEPOINT %s", escapeIdentifier(name))
 	return tx.conn.execInternal(context.Background(), query)
 }

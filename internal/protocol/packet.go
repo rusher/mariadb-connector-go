@@ -9,6 +9,13 @@ import (
 	"io"
 )
 
+// HdrSize is the number of bytes reserved at the start of every packet buffer
+// for the MySQL protocol header (3-byte length + 1-byte sequence number).
+const HdrSize = 4
+
+// hdrSize is the package-local alias.
+const hdrSize = HdrSize
+
 // PacketReader reads MySQL protocol packets
 type PacketReader struct {
 	reader   io.Reader
@@ -168,6 +175,32 @@ func (pw *PacketWriter) WritePacket(data []byte) error {
 	}
 
 	return nil
+}
+
+// Write writes a packet whose first 4 bytes are reserved for the header.
+// For payloads ≤ MaxPacketSize (the common case) it fills buf[0:4] in-place
+// and issues a single Write syscall — zero extra allocations, zero extra copies.
+// For larger payloads it falls back to WritePacket.
+func (pw *PacketWriter) Write(buf []byte) error {
+	payload := buf[hdrSize:]
+	payloadLen := len(payload)
+
+	if pw.logger.IsEnabled() {
+		pw.logger.LogSend(payload, *pw.sequence)
+	}
+
+	if payloadLen <= MaxPacketSize {
+		buf[0] = byte(payloadLen)
+		buf[1] = byte(payloadLen >> 8)
+		buf[2] = byte(payloadLen >> 16)
+		buf[3] = *pw.sequence
+		*pw.sequence++
+		_, err := pw.writer.Write(buf)
+		return err
+	}
+
+	// Rare: payload exceeds 16 MB — fall back to multi-packet path.
+	return pw.WritePacket(payload)
 }
 
 // ResetSequence resets the sequence number

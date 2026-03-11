@@ -24,3 +24,8 @@ type Config = client.Config
 func ParseDSN(dsn string) (*Config, error) {
 	return client.ParseDSN(dsn)
 }
+
+// FormatDSN formats a Config into a DSN string
+func FormatDSN(cfg *Config) string {
+	return client.FormatDSN(cfg)
+}

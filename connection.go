@@ -6,9 +6,12 @@ package mariadb
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 
 	"github.com/mariadb-connector-go/mariadb/internal/client"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
+	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
+	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Conn implements driver.Conn interface
@@ -17,9 +20,6 @@ type Conn struct {
 	client  *client.Client
 	config  *client.Config
 	context *Context
-
-	// Active result set tracking
-	activeRows *Rows // Currently active streaming result set
 }
 
 // newConn creates a new connection wrapper
@@ -50,11 +50,7 @@ func (c *Conn) connect(ctx context.Context) error {
 
 // Prepare returns a prepared statement, bound to this connection
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-	return c.PrepareContext(context.Background(), query)
-}
 
-// PrepareContext returns a prepared statement, bound to this connection
-func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
 	c.client.Lock()
 	defer c.client.Unlock()
 
@@ -65,6 +61,12 @@ func (c *Conn) PrepareContext(ctx context.Context, query string) (driver.Stmt, e
 	stmt := &Stmt{
 		conn:  c,
 		query: query,
+	}
+
+	if !c.context.CanPipelinePrepare() {
+		if err := stmt.prepareInternal(); err != nil {
+			return nil, err
+		}
 	}
 
 	return stmt, nil
@@ -140,33 +142,22 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, driver.ErrSkip // Use prepared statement for queries with args
 	}
 
-	// Buffer any active result set before issuing new command
-	if err := c.bufferActiveRows(); err != nil {
-		return nil, err
-	}
-
-	// Build COM_QUERY packet
-	packet := make([]byte, 1+len(query))
-	packet[0] = protocol.COM_QUERY
-	copy(packet[1:], query)
-
-	// Send command (resets sequence)
-	if err := c.client.SendCommand(packet); err != nil {
-		return nil, err
-	}
-
-	// Read response
-	response, err := c.client.ReadPacket()
+	// Use client's Exec method which handles buffering and packet creation
+	completions, err := c.client.Exec(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse result
-	result, err := protocol.ParseResultPacket(response)
-	if err != nil {
-		return nil, err
+	// Return the last non-result-set completion directly (implements driver.Result)
+	var result *protocol.Completion
+	for _, comp := range completions {
+		if !comp.HasResultSet() {
+			result = comp
+		}
 	}
-
+	if result == nil {
+		result = &protocol.Completion{}
+	}
 	return result, nil
 }
 
@@ -184,94 +175,35 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, driver.ErrSkip // Use prepared statement for queries with args
 	}
 
-	// Buffer any active result set before issuing new command
-	if err := c.bufferActiveRows(); err != nil {
-		return nil, err
-	}
-
-	// Build COM_QUERY packet
-	packet := make([]byte, 1+len(query))
-	packet[0] = protocol.COM_QUERY
-	copy(packet[1:], query)
-
-	// Send command (resets sequence)
-	if err := c.client.SendCommand(packet); err != nil {
-		return nil, err
-	}
-
-	// Read column count
-	columnCountData, err := c.client.ReadPacket()
+	// Use client's Query method which handles buffering and packet creation
+	completions, err := c.client.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for error
-	if len(columnCountData) > 0 && columnCountData[0] == 0xff {
-		return nil, protocol.ParseErrorPacket(columnCountData)
-	}
-
-	// Check for OK packet (no result set)
-	if len(columnCountData) > 0 && columnCountData[0] == 0x00 {
-		return &Rows{conn: c, columns: []*protocol.ColumnDefinition{}, closed: true}, nil
-	}
-
-	// Parse column count
-	columnCount, _, err := protocol.ReadLengthEncodedInteger(columnCountData, 0)
-	if err != nil {
-		return nil, err
-	}
-
-	// Read column definitions
-	columns := make([]*protocol.ColumnDefinition, columnCount)
-	for i := 0; i < int(columnCount); i++ {
-		colData, err := c.client.ReadPacket()
-		if err != nil {
-			return nil, err
-		}
-
-		col, err := protocol.ParseColumnDefinition(colData)
-		if err != nil {
-			return nil, err
-		}
-		columns[i] = col
-	}
-
-	// Read EOF packet after column definitions (if not using CLIENT_DEPRECATE_EOF)
-	if !c.context.IsEOFDeprecated() {
-		eofData, err := c.client.ReadPacket()
-		if err != nil {
-			return nil, err
-		}
-		// Verify it's actually an EOF packet (0xfe with length < 9)
-		if len(eofData) == 0 || (eofData[0] != 0xfe || len(eofData) >= 9) {
-			return nil, protocol.ParseErrorPacket(eofData)
+	// Error if no completion returned a result set
+	hasResultSet := false
+	for _, comp := range completions {
+		if comp.HasResultSet() {
+			hasResultSet = true
+			break
 		}
 	}
+	if !hasResultSet {
+		return nil, fmt.Errorf("query did not return a result set")
+	}
 
-	// Create streaming rows
 	rows := &Rows{
-		conn:    c,
-		columns: columns,
-		binary:  false,
+		conn:        c,
+		completions: completions,
 	}
 
-	// Track as active result set
-	c.activeRows = rows
+	// If the first completion has streaming rows, track as active
+	if !completions[0].Loaded {
+		c.client.SetActiveRows(rows)
+	}
 
 	return rows, nil
-}
-
-// bufferActiveRows buffers any active streaming result set into memory
-// This allows the connection to be used for another command
-// Must be called with connection mutex locked
-func (c *Conn) bufferActiveRows() error {
-	if c.activeRows != nil && !c.activeRows.closed && !c.activeRows.buffered {
-		if err := c.activeRows.bufferRemaining(); err != nil {
-			return err
-		}
-		c.activeRows = nil
-	}
-	return nil
 }
 
 // Ping verifies the connection is still alive
@@ -283,9 +215,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 		return driver.ErrBadConn
 	}
 
-	// Send COM_PING (resets sequence)
-	packet := []byte{protocol.COM_PING}
-	if err := c.client.SendCommand(packet); err != nil {
+	if err := c.client.Send(clientpkt.NewPing()); err != nil {
 		return err
 	}
 
@@ -297,7 +227,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 
 	// Check for error
 	if len(response) > 0 && response[0] == 0xff {
-		return protocol.ParseErrorPacket(response)
+		return server.ParseErrorPacket(response)
 	}
 
 	// Verify it's an OK packet
@@ -320,8 +250,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 
 	// Send COM_RESET_CONNECTION if supported
 	if c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
-		packet := []byte{protocol.COM_RESET_CONNECTION}
-		if err := c.client.WritePacket(packet); err != nil {
+		if err := c.client.Send(clientpkt.NewResetConnection()); err != nil {
 			return err
 		}
 
@@ -333,7 +262,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 
 		// Check for error
 		if len(response) > 0 && response[0] == 0xff {
-			return protocol.ParseErrorPacket(response)
+			return server.ParseErrorPacket(response)
 		}
 	}
 

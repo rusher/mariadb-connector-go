@@ -77,10 +77,10 @@ func (p *NativePasswordPlugin) InitAuth(authData []byte, cfg *Config) ([]byte, e
 	if !cfg.AllowNativePasswords {
 		return nil, ErrNativePassword
 	}
-	if cfg.Password == "" {
+	if cfg.Passwd == "" {
 		return []byte{}, nil
 	}
-	return scramblePassword(authData, cfg.Password), nil
+	return scramblePassword(authData, cfg.Passwd), nil
 }
 
 // scramblePassword scrambles a password using MySQL native password algorithm
@@ -126,7 +126,7 @@ func (p *Ed25519Plugin) PluginName() string {
 }
 
 func (p *Ed25519Plugin) InitAuth(authData []byte, cfg *Config) ([]byte, error) {
-	if cfg.Password == "" {
+	if cfg.Passwd == "" {
 		return []byte{}, nil
 	}
 
@@ -135,7 +135,7 @@ func (p *Ed25519Plugin) InitAuth(authData []byte, cfg *Config) ([]byte, error) {
 		return nil, fmt.Errorf("ed25519: invalid authData length: expected 32, got %d", len(authData))
 	}
 
-	h := sha512.Sum512([]byte(cfg.Password))
+	h := sha512.Sum512([]byte(cfg.Passwd))
 
 	s, err := edwards25519.NewScalar().SetBytesWithClamping(h[:32])
 	if err != nil {
@@ -216,7 +216,7 @@ func (p *ParsecPlugin) ContinuationAuth(packet []byte, authData []byte, cfg *Con
 	salt := packet[pos:]
 
 	iterationCount := 1024 << iterations
-	derivedKey := pbkdf2.Key([]byte(cfg.Password), salt, iterationCount, 32, sha512.New)
+	derivedKey := pbkdf2.Key([]byte(cfg.Passwd), salt, iterationCount, 32, sha512.New)
 
 	privateKey := ed25519.NewKeyFromSeed(derivedKey)
 
@@ -256,7 +256,7 @@ func (p *CachingSha2Plugin) PluginName() string {
 }
 
 func (p *CachingSha2Plugin) InitAuth(authData []byte, cfg *Config) ([]byte, error) {
-	return scrambleSHA256Password(authData, cfg.Password), nil
+	return scrambleSHA256Password(authData, cfg.Passwd), nil
 }
 
 func (p *CachingSha2Plugin) ContinuationAuth(packet []byte, authData []byte, cfg *Config) ([]byte, bool, error) {
@@ -269,10 +269,10 @@ func (p *CachingSha2Plugin) ContinuationAuth(packet []byte, authData []byte, cfg
 		return nil, true, nil
 	case cachingSha2FullAuthNeeded:
 		if cfg.TLS != nil || cfg.TLSConfig != "" {
-			return append([]byte(cfg.Password), 0), true, nil
+			return append([]byte(cfg.Passwd), 0), true, nil
 		}
 		// Use the server public key directly (it's already *rsa.PublicKey)
-		encrypted, err := encryptPassword(cfg.Password, authData, cfg.ServerPublicKey)
+		encrypted, err := encryptPassword(cfg.Passwd, authData, cfg.ServerPublicKey)
 		if err != nil {
 			return nil, false, err
 		}
@@ -292,7 +292,7 @@ func (p *CachingSha2Plugin) ContinuationAuth(packet []byte, authData []byte, cfg
 				return nil, false, err
 			}
 			pubKey := pkix.(*rsa.PublicKey)
-			enc, err := encryptPassword(cfg.Password, authData, pubKey)
+			enc, err := encryptPassword(cfg.Passwd, authData, pubKey)
 			if err != nil {
 				return nil, false, err
 			}
@@ -334,16 +334,16 @@ func (p *Sha256Plugin) PluginName() string {
 }
 
 func (p *Sha256Plugin) InitAuth(authData []byte, cfg *Config) ([]byte, error) {
-	if cfg.Password == "" {
+	if cfg.Passwd == "" {
 		return []byte{}, nil
 	}
 
 	if cfg.TLS != nil || cfg.TLSConfig != "" {
-		return append([]byte(cfg.Password), 0), nil
+		return append([]byte(cfg.Passwd), 0), nil
 	}
 
 	if cfg.ServerPublicKey != nil {
-		enc, err := encryptPassword(cfg.Password, authData, cfg.ServerPublicKey)
+		enc, err := encryptPassword(cfg.Passwd, authData, cfg.ServerPublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt password: %w", err)
 		}
@@ -369,7 +369,7 @@ func (p *Sha256Plugin) ContinuationAuth(packet []byte, authData []byte, cfg *Con
 		return nil, false, fmt.Errorf("public key is not RSA")
 	}
 
-	enc, err := encryptPassword(cfg.Password, authData, pubKey)
+	enc, err := encryptPassword(cfg.Passwd, authData, pubKey)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to encrypt password: %w", err)
 	}
@@ -393,7 +393,7 @@ func (p *ClearPasswordPlugin) InitAuth(authData []byte, cfg *Config) ([]byte, er
 	if !cfg.AllowCleartextPasswords {
 		return nil, ErrCleartextPassword
 	}
-	return append([]byte(cfg.Password), 0), nil
+	return append([]byte(cfg.Passwd), 0), nil
 }
 
 // ============================================================================
@@ -409,7 +409,7 @@ func (p *PamPlugin) PluginName() string {
 }
 
 func (p *PamPlugin) InitAuth(authData []byte, cfg *Config) ([]byte, error) {
-	return []byte(cfg.Password + "\x00"), nil
+	return []byte(cfg.Passwd + "\x00"), nil
 }
 
 func (p *PamPlugin) ContinuationAuth(packet []byte, authData []byte, cfg *Config) ([]byte, bool, error) {
@@ -422,7 +422,7 @@ func (p *PamPlugin) ContinuationAuth(packet []byte, authData []byte, cfg *Config
 		return nil, false, fmt.Errorf("invalid PAM packet format")
 	}
 
-	return []byte(cfg.Password + "\x00"), false, nil
+	return []byte(cfg.Passwd + "\x00"), false, nil
 }
 
 // ============================================================================

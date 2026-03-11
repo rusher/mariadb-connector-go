@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
+	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
@@ -23,6 +24,9 @@ type Client struct {
 	reader   *protocol.PacketReader
 	writer   *protocol.PacketWriter
 	sequence uint8 // Shared packet sequence number
+
+	// Active result set tracking
+	activeRows interface{} // Currently active streaming result set (type will be *Rows from parent package)
 
 	closed bool
 	mu     sync.Mutex
@@ -43,7 +47,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	var err error
 
 	// Establish network connection
-	if c.config.Protocol == "unix" {
+	if c.config.Net == "unix" {
 		c.netConn, err = net.Dial("unix", c.config.Socket)
 	} else {
 		addr := fmt.Sprintf("%s:%d", c.config.Host, c.config.Port)
@@ -93,21 +97,22 @@ func (c *Client) handshake(ctx context.Context) error {
 	}
 
 	// Parse handshake packet
-	handshake, err := protocol.ParseHandshakePacket(data)
+	handshake, err := server.ParseHandshakePacket(data)
 	if err != nil {
 		return fmt.Errorf("failed to parse handshake packet: %w", err)
 	}
 
 	// Initialize client capabilities based on configuration and server capabilities
-	clientCaps := protocol.InitializeClientCapabilities(c.config, handshake.ServerCapabilities, c.config.Database)
+	clientCaps := protocol.InitializeClientCapabilities(c.config, handshake.ServerCapabilities, c.config.DBName)
 
 	// Create connection context
 	c.context = NewContext(c.config, handshake, clientCaps)
 
 	// Build handshake response
-	response, err := protocol.BuildHandshakeResponse(
+	response, err := server.BuildHandshakeResponse(
 		c.config,
 		handshake,
+		clientCaps,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to build handshake response: %w", err)
@@ -155,14 +160,9 @@ func (c *Client) setCharset() error {
 		query = fmt.Sprintf("SET NAMES %s", c.config.Charset)
 	}
 
-	// Build COM_QUERY packet
-	packet := make([]byte, 1+len(query))
-	packet[0] = protocol.COM_QUERY
-	copy(packet[1:], query)
-
 	// Send command (resets sequence)
 	c.sequence = 0
-	if err := c.writer.WritePacket(packet); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
 		return fmt.Errorf("failed to send SET NAMES query: %w", err)
 	}
 
@@ -174,7 +174,7 @@ func (c *Client) setCharset() error {
 
 	// Check for error packet
 	if len(data) > 0 && data[0] == 0xff {
-		return protocol.ParseErrorPacket(data)
+		return server.ParseErrorPacket(data)
 	}
 
 	// Should be OK packet - parse it to update context
@@ -185,29 +185,76 @@ func (c *Client) setCharset() error {
 	return nil
 }
 
-// SendCommand resets sequence and sends a command packet
-func (c *Client) SendCommand(commandPacket []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Reset sequence for new command
+// Send resets the sequence and sends a packet whose first 4 bytes are reserved
+// for the header (as returned by clientpkt constructors).
+// Must be called with client mutex locked.
+func (c *Client) Send(buf []byte) error {
 	c.sequence = 0
-	return c.writer.WritePacket(commandPacket)
+	return c.writer.Write(buf)
 }
 
-// ReadPacket reads a packet from the server
-func (c *Client) ReadPacket() ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// SendNext sends a continuation packet without resetting the sequence number.
+// Use after Send to pipeline multiple packets before reading any response.
+// Must be called with client mutex locked.
+func (c *Client) SendNext(buf []byte) error {
+	return c.writer.Write(buf)
+}
 
+// ReadPrepareResponse reads and parses a COM_STMT_PREPARE response.
+// It returns the statement ID and consumes the param/column definition packets.
+// Must be called with client mutex locked.
+func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, columnCount uint16, err error) {
+	response, err := c.reader.ReadPacket()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	if len(response) > 0 && response[0] == 0xff {
+		return 0, 0, 0, server.ParseErrorPacket(response)
+	}
+
+	if len(response) < 12 || response[0] != 0x00 {
+		return 0, 0, 0, fmt.Errorf("unexpected COM_STMT_PREPARE response (first byte: 0x%02x)", response[0])
+	}
+
+	stmtID = protocol.GetUint32(response[1:])
+	columnCount = protocol.GetUint16(response[5:])
+	paramCount = protocol.GetUint16(response[7:])
+
+	for i := 0; i < int(paramCount); i++ {
+		if _, err = c.reader.ReadPacket(); err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if paramCount > 0 && !c.context.IsEOFDeprecated() {
+		if _, err = c.reader.ReadPacket(); err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	for i := 0; i < int(columnCount); i++ {
+		if _, err = c.reader.ReadPacket(); err != nil {
+			return 0, 0, 0, err
+		}
+	}
+	if columnCount > 0 && !c.context.IsEOFDeprecated() {
+		if _, err = c.reader.ReadPacket(); err != nil {
+			return 0, 0, 0, err
+		}
+	}
+
+	return stmtID, paramCount, columnCount, nil
+}
+
+// ReadPacket reads a packet from the server.
+// Must be called with client mutex locked.
+func (c *Client) ReadPacket() ([]byte, error) {
 	return c.reader.ReadPacket()
 }
 
-// WritePacket writes a packet to the server
+// WritePacket writes a raw (no header reservation) packet to the server.
+// Must be called with client mutex locked.
 func (c *Client) WritePacket(data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	return c.writer.WritePacket(data)
 }
 
@@ -224,8 +271,7 @@ func (c *Client) Close() error {
 
 	// Send COM_QUIT
 	if c.writer != nil {
-		quitPacket := []byte{protocol.COM_QUIT}
-		c.writer.WritePacket(quitPacket)
+		c.writer.Write(clientpkt.NewQuit()) //nolint:errcheck
 	}
 
 	if c.netConn != nil {
@@ -271,31 +317,24 @@ func (c *Client) Sequence() *uint8 {
 	return &c.sequence
 }
 
-// ExecInternal executes a query without returning results (internal use)
+// ExecInternal executes a query without returning results.
+// Acquires its own lock — use only when the caller does NOT already hold it.
 func (c *Client) ExecInternal(ctx context.Context, query string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Build COM_QUERY packet
-	packet := make([]byte, 1+len(query))
-	packet[0] = protocol.COM_QUERY
-	copy(packet[1:], query)
-
-	// Send command (resets sequence)
 	c.sequence = 0
-	if err := c.writer.WritePacket(packet); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
 		return err
 	}
 
-	// Read response
 	response, err := c.reader.ReadPacket()
 	if err != nil {
 		return err
 	}
 
-	// Check for error
 	if len(response) > 0 && response[0] == 0xff {
-		return protocol.ParseErrorPacket(response)
+		return server.ParseErrorPacket(response)
 	}
 
 	return nil

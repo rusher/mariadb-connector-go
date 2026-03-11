@@ -49,9 +49,18 @@ func ParseDSN(dsn string) (*Config, error) {
 		dsn = dsn[idx+1:]
 	}
 
-	// Split by '/' to get database and params
+	// Split by '/' to get database and params.
+	// If the address uses protocol(addr) form, find the slash after the closing ')'.
 	if foundSlash {
-		if idx := strings.Index(dsn, "/"); idx != -1 {
+		splitIdx := strings.Index(dsn, "/")
+		if closeIdx := strings.Index(dsn, ")"); closeIdx != -1 {
+			// Find first '/' after the closing ')'
+			if after := strings.Index(dsn[closeIdx:], "/"); after != -1 {
+				splitIdx = closeIdx + after
+			}
+		}
+		if splitIdx != -1 {
+			idx := splitIdx
 			netAddr = dsn[:idx]
 			remainder := dsn[idx+1:]
 
@@ -71,7 +80,7 @@ func ParseDSN(dsn string) (*Config, error) {
 	if userInfo != "" {
 		if idx := strings.Index(userInfo, ":"); idx != -1 {
 			cfg.User = userInfo[:idx]
-			cfg.Password = userInfo[idx+1:]
+			cfg.Passwd = userInfo[idx+1:]
 		} else {
 			cfg.User = userInfo
 		}
@@ -80,14 +89,14 @@ func ParseDSN(dsn string) (*Config, error) {
 	// Parse network address: protocol(address)
 	if netAddr != "" {
 		if idx := strings.Index(netAddr, "("); idx != -1 {
-			cfg.Protocol = netAddr[:idx]
+			cfg.Net = netAddr[:idx]
 			endIdx := strings.Index(netAddr, ")")
 			if endIdx == -1 {
 				return nil, errors.New("invalid DSN: missing closing parenthesis")
 			}
 			address := netAddr[idx+1 : endIdx]
 
-			if cfg.Protocol == "unix" {
+			if cfg.Net == "unix" {
 				cfg.Socket = address
 			} else {
 				// Parse host:port
@@ -106,7 +115,7 @@ func ParseDSN(dsn string) (*Config, error) {
 			}
 		} else {
 			// No protocol specified, assume tcp
-			cfg.Protocol = "tcp"
+			cfg.Net = "tcp"
 			host, port, err := net.SplitHostPort(netAddr)
 			if err != nil {
 				cfg.Host = netAddr
@@ -122,7 +131,7 @@ func ParseDSN(dsn string) (*Config, error) {
 	}
 
 	// Set database name
-	cfg.Database = dbName
+	cfg.DBName = dbName
 
 	// Parse parameters
 	if params != "" {
@@ -235,6 +244,14 @@ func ParseDSN(dsn string) (*Config, error) {
 				}
 				cfg.TimeTruncate = d
 
+			// Fetch size
+			case "fetchSize":
+				size, err := strconv.Atoi(value)
+				if err != nil {
+					return nil, fmt.Errorf("invalid fetchSize: %w", err)
+				}
+				cfg.FetchSize = size
+
 			// Boolean options
 			case "allowAllFiles":
 				cfg.AllowAllFiles = parseBool(value)
@@ -328,13 +345,13 @@ func parseBool(value string) bool {
 // normalizeConfig normalizes and validates the configuration
 func normalizeConfig(cfg *Config) error {
 	// Set default network if empty
-	if cfg.Protocol == "" {
-		cfg.Protocol = "tcp"
+	if cfg.Net == "" {
+		cfg.Net = "tcp"
 	}
 
 	// Compute Addr from Host/Port or Socket
 	if cfg.Addr == "" {
-		if cfg.Protocol == "unix" {
+		if cfg.Net == "unix" {
 			if cfg.Socket != "" {
 				cfg.Addr = cfg.Socket
 			} else {
@@ -374,17 +391,17 @@ func FormatDSN(cfg *Config) string {
 	// User info
 	if cfg.User != "" {
 		buf.WriteString(cfg.User)
-		if cfg.Password != "" {
+		if cfg.Passwd != "" {
 			buf.WriteByte(':')
-			buf.WriteString(cfg.Password)
+			buf.WriteString(cfg.Passwd)
 		}
 		buf.WriteByte('@')
 	}
 
 	// Protocol and address
-	buf.WriteString(cfg.Protocol)
+	buf.WriteString(cfg.Net)
 	buf.WriteByte('(')
-	if cfg.Protocol == "unix" {
+	if cfg.Net == "unix" {
 		buf.WriteString(cfg.Socket)
 	} else {
 		buf.WriteString(cfg.Host)
@@ -397,7 +414,7 @@ func FormatDSN(cfg *Config) string {
 
 	// Database
 	buf.WriteByte('/')
-	buf.WriteString(cfg.Database)
+	buf.WriteString(cfg.DBName)
 
 	// Parameters
 	hasParams := false
@@ -460,6 +477,11 @@ func FormatDSN(cfg *Config) string {
 	// Time truncate
 	if cfg.TimeTruncate > 0 {
 		addParam("timeTruncate", cfg.TimeTruncate.String())
+	}
+
+	// Fetch size (only add if non-default)
+	if cfg.FetchSize > 0 && cfg.FetchSize != 16 {
+		addParam("fetchSize", strconv.Itoa(cfg.FetchSize))
 	}
 
 	// Boolean options (only add if non-default)

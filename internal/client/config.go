@@ -16,16 +16,16 @@ import (
 // Config holds the configuration for a MariaDB/MySQL connection
 type Config struct {
 	// Network and address
-	Protocol string // "tcp", "tcp6", "unix" (default: "tcp")
-	Host     string // Hostname (default: "127.0.0.1")
-	Port     int    // Port (default: 3306)
-	Socket   string // Unix socket path (default: "/tmp/mysql.sock" for unix)
-	Addr     string // Network address (computed from Host:Port or Socket)
+	Net    string // "tcp", "tcp6", "unix" (default: "tcp")
+	Host   string // Hostname (default: "127.0.0.1")
+	Port   int    // Port (default: 3306)
+	Socket string // Unix socket path (default: "/tmp/mysql.sock" for unix)
+	Addr   string // Network address (computed from Host:Port or Socket)
 
 	// Authentication
-	User     string // Username
-	Password string // Password (requires User)
-	Database string // Database name
+	User   string // Username
+	Passwd string // Password (requires User)
+	DBName string // Database name
 
 	// Timeouts
 	Timeout      time.Duration // Dial timeout (default: 10s)
@@ -65,8 +65,7 @@ type Config struct {
 	RejectReadOnly           bool // Reject read-only connections
 
 	// Result set options
-	FetchSize        int // Number of rows to fetch at once for streaming results (0 = complete fetch, >0 = streaming)
-	DefaultFetchSize int // Default fetch size if not specified (default: 0 = complete)
+	FetchSize int // Number of rows to pre-fetch for streaming results (default: 16)
 
 	// Debug options
 	Debug bool // Enable debug logging of all protocol exchanges
@@ -88,16 +87,16 @@ func (c *Config) GetUser() string {
 
 // GetPassword returns the password for handshake
 func (c *Config) GetPassword() string {
-	return c.Password
+	return c.Passwd
 }
 
 // GetDatabase returns the database name for handshake
 func (c *Config) GetDatabase() string {
-	return c.Database
+	return c.DBName
 }
 
-// AllowMultiQueries returns whether multi-queries are allowed
-func (c *Config) AllowMultiQueries() bool {
+// AllowMultiStatements returns whether multi-statement queries are allowed
+func (c *Config) AllowMultiStatements() bool {
 	return c.MultiStatements
 }
 
@@ -123,7 +122,7 @@ func (c *Config) UseCompression() bool {
 
 // GetProtocol returns the protocol
 func (c *Config) GetProtocol() string {
-	return c.Protocol
+	return c.Net
 }
 
 // GetHost returns the host
@@ -196,9 +195,9 @@ func (c *Config) GetAllowLocalInfile() bool {
 	return c.AllowLocalInfile()
 }
 
-// GetAllowMultiQueries returns whether multi-queries are allowed
-func (c *Config) GetAllowMultiQueries() bool {
-	return c.AllowMultiQueries()
+// GetAllowMultiStatements returns whether multi-statement queries are allowed
+func (c *Config) GetAllowMultiStatements() bool {
+	return c.AllowMultiStatements()
 }
 
 // GetUseAffectedRows returns whether to use affected rows
@@ -249,7 +248,7 @@ func (c *Config) ValidateCharset() error {
 // NewConfig creates a new Config with default values
 func NewConfig() *Config {
 	return &Config{
-		Protocol:                "tcp",
+		Net:                     "tcp",
 		Host:                    "127.0.0.1",
 		Port:                    3306,
 		Timeout:                 10 * time.Second,
@@ -259,6 +258,7 @@ func NewConfig() *Config {
 		AllowNativePasswords:    true,
 		AllowPublicKeyRetrieval: true,
 		CheckConnLiveness:       true,
+		FetchSize:               16,
 		Params:                  make(map[string]string),
 	}
 }
@@ -270,14 +270,14 @@ func (c *Config) Clone() *Config {
 	}
 
 	clone := &Config{
-		Protocol:                 c.Protocol,
+		Net:                      c.Net,
 		Host:                     c.Host,
 		Port:                     c.Port,
 		Socket:                   c.Socket,
 		Addr:                     c.Addr,
 		User:                     c.User,
-		Password:                 c.Password,
-		Database:                 c.Database,
+		Passwd:                   c.Passwd,
+		DBName:                   c.DBName,
 		Timeout:                  c.Timeout,
 		ReadTimeout:              c.ReadTimeout,
 		WriteTimeout:             c.WriteTimeout,
@@ -302,7 +302,6 @@ func (c *Config) Clone() *Config {
 		ParseTime:                c.ParseTime,
 		RejectReadOnly:           c.RejectReadOnly,
 		FetchSize:                c.FetchSize,
-		DefaultFetchSize:         c.DefaultFetchSize,
 		Debug:                    c.Debug,
 		Compress:                 c.Compress,
 		TimeTruncate:             c.TimeTruncate,

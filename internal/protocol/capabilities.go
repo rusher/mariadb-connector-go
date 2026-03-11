@@ -5,7 +5,7 @@ package protocol
 
 // CapabilityConfig interface for capability initialization
 type CapabilityConfig interface {
-	AllowMultiQueries() bool
+	AllowMultiStatements() bool
 	UseAffectedRows() bool
 	AllowLocalInfile() bool
 	UseCompression() bool
@@ -33,7 +33,7 @@ func InitializeClientCapabilities(config CapabilityConfig, serverCapabilities ui
 	if !config.UseAffectedRows() {
 		capabilities |= FOUND_ROWS
 	}
-	if config.AllowMultiQueries() {
+	if config.AllowMultiStatements() {
 		capabilities |= MULTI_STATEMENTS
 	}
 	if config.AllowLocalInfile() {

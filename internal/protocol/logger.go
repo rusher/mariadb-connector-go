@@ -65,7 +65,7 @@ func (l *DebugLogger) LogReceive(data []byte, sequence uint8) {
 // |000010| 6D 69 74 3D 31 2C 20 73  65 73 73 69 6F 6E 5F 74 | mit=1, session_t |
 // +------+--------------------------------------------------+------------------+
 func hexDump(data []byte, offset, length int) string {
-	if data == nil || len(data) == 0 {
+	if len(data) == 0 {
 		return ""
 	}
 

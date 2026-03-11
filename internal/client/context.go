@@ -5,6 +5,7 @@ package client
 
 import (
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
+	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Context represents the current connection state
@@ -31,7 +32,7 @@ type Context struct {
 }
 
 // NewContext creates a new connection context from handshake
-func NewContext(config *Config, handshake *protocol.HandshakePacket, clientCaps uint64) *Context {
+func NewContext(config *Config, handshake *server.HandshakePacket, clientCaps uint64) *Context {
 	// Negotiated capabilities = client AND server
 	negotiatedCaps := clientCaps & handshake.ServerCapabilities
 
@@ -94,6 +95,12 @@ func (c *Context) SetServerStatus(status uint16) {
 // GetServerVersion returns the server version string
 func (c *Context) GetServerVersion() string {
 	return c.serverVersion
+}
+
+// CanPipelinePrepare reports whether the server supports pipelined
+// COM_STMT_PREPARE + COM_STMT_EXECUTE (MariaDB STMT_BULK_OPERATIONS capability).
+func (c *Context) CanPipelinePrepare() bool {
+	return c.HasClientCapability(protocol.STMT_BULK_OPERATIONS)
 }
 
 // IsEOFDeprecated returns whether EOF packets are deprecated
