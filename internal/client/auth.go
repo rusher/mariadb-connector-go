@@ -7,7 +7,8 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
+	authpkg "github.com/mariadb-connector-go/mariadb/internal/client/auth"
+	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
 
 const (
@@ -36,12 +37,12 @@ func (c *Client) handleAuthResult(data []byte, initialSeed []byte, initialPlugin
 		switch data[0] {
 		case iOK:
 			// OK packet - authentication successful
-			_, err := server.ParseOkPacket(data, c.context)
+			_, err := protocol.ParseOkPacket(data, c.context)
 			return err
 
 		case iERR:
 			// Error packet
-			return server.ParseErrorPacket(data)
+			return protocol.ParseErrorPacket(data)
 
 		case iEOF:
 			// Auth switch request
@@ -51,7 +52,7 @@ func (c *Client) handleAuthResult(data []byte, initialSeed []byte, initialPlugin
 			}
 
 			// Get the authentication plugin from static registry
-			authPlugin, exists := GetAuthPlugin(pluginName)
+			authPlugin, exists := authpkg.GetAuthPlugin(pluginName)
 			if !exists {
 				return fmt.Errorf("authentication plugin '%s' is not supported", pluginName)
 			}
@@ -82,7 +83,7 @@ func (c *Client) handleAuthResult(data []byte, initialSeed []byte, initialPlugin
 
 		// Not a terminal packet, let the plugin process it
 		// Get the current authentication plugin
-		authPlugin, exists := GetAuthPlugin(initialPluginName)
+		authPlugin, exists := authpkg.GetAuthPlugin(initialPluginName)
 		if !exists {
 			return fmt.Errorf("authentication plugin '%s' is not supported", initialPluginName)
 		}

@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Copyright (c) 2026 MariaDB Corporation Ab
 
-package server
+package protocol
 
 import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
-
-	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
 
 // HandshakePacket represents the initial handshake from server
@@ -36,7 +34,7 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 	pos++
 
 	// Server version (null-terminated)
-	serverVersion, newPos, err := protocol.ReadNullTerminatedString(data, pos)
+	serverVersion, newPos, err := ReadNullTerminatedString(data, pos)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read server version: %w", err)
 	}
@@ -101,7 +99,7 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 
 						// Auth plugin name (null-terminated)
 						if pos < len(data) {
-							authPluginName, _, err := protocol.ReadNullTerminatedString(data, pos)
+							authPluginName, _, err := ReadNullTerminatedString(data, pos)
 							if err == nil {
 								packet.AuthPluginName = authPluginName
 							}
@@ -143,7 +141,7 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 	buf.Write(maxPacketBytes)
 
 	// Character set (1 byte) - utf8mb4
-	buf.WriteByte(protocol.CHARSET_UTF8MB4)
+	buf.WriteByte(CHARSET_UTF8MB4)
 
 	// Reserved (19 bytes)
 	buf.Write(make([]byte, 19))
@@ -172,10 +170,10 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 	}
 
 	// Write auth response with length
-	if handshake.ServerCapabilities&protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
-		buf.Write(protocol.WriteLengthEncodedInteger(nil, uint64(len(authResponse))))
+	if handshake.ServerCapabilities&CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
+		buf.Write(WriteLengthEncodedInteger(nil, uint64(len(authResponse))))
 		buf.Write(authResponse)
-	} else if handshake.ServerCapabilities&protocol.CLIENT_SECURE_CONNECTION != 0 {
+	} else if handshake.ServerCapabilities&CLIENT_SECURE_CONNECTION != 0 {
 		buf.WriteByte(byte(len(authResponse)))
 		buf.Write(authResponse)
 	} else {
@@ -184,13 +182,13 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 	}
 
 	// Database name (null-terminated) if CLIENT_CONNECT_WITH_DB
-	if clientCaps&protocol.CLIENT_CONNECT_WITH_DB != 0 {
+	if clientCaps&CLIENT_CONNECT_WITH_DB != 0 {
 		buf.WriteString(config.GetDatabase())
 		buf.WriteByte(0)
 	}
 
 	// Auth plugin name (null-terminated) if CLIENT_PLUGIN_AUTH
-	if handshake.ServerCapabilities&protocol.PLUGIN_AUTH != 0 {
+	if handshake.ServerCapabilities&PLUGIN_AUTH != 0 {
 		pluginName := handshake.AuthPluginName
 		if pluginName == "" {
 			pluginName = "mysql_native_password"
@@ -200,22 +198,22 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 	}
 
 	// Connection attributes if CLIENT_CONNECT_ATTRS
-	if clientCaps&protocol.CONNECT_ATTRS != 0 && handshake.ServerCapabilities&protocol.CONNECT_ATTRS != 0 {
+	if clientCaps&CONNECT_ATTRS != 0 && handshake.ServerCapabilities&CONNECT_ATTRS != 0 {
 		var attrBuf bytes.Buffer
 
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_client_name"))
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "mariadb-connector-go"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "_client_name"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "mariadb-connector-go"))
 
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_client_version"))
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "1.0.0"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "_client_version"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "1.0.0"))
 
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_os"))
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "Linux"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "_os"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "Linux"))
 
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_platform"))
-		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "x86_64"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "_platform"))
+		attrBuf.Write(WriteLengthEncodedString(nil, "x86_64"))
 
-		buf.Write(protocol.WriteLengthEncodedInteger(nil, uint64(attrBuf.Len())))
+		buf.Write(WriteLengthEncodedInteger(nil, uint64(attrBuf.Len())))
 		buf.Write(attrBuf.Bytes())
 	}
 

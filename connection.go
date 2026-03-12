@@ -10,8 +10,6 @@ import (
 
 	"github.com/mariadb-connector-go/mariadb/internal/client"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Conn implements driver.Conn interface
@@ -187,7 +185,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 	}
 	defer stop()
 
-	if err := c.client.Send(clientpkt.NewPing(c.client.WriterBuf())); err != nil {
+	if err := c.client.Send(protocol.NewPing(c.client.WriterBuf())); err != nil {
 		return err
 	}
 
@@ -196,7 +194,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 		return driver.ErrBadConn
 	}
 	if len(response) > 0 && response[0] == 0xff {
-		return server.ParseErrorPacket(response)
+		return protocol.ParseErrorPacket(response)
 	}
 	if len(response) == 0 || response[0] != 0x00 {
 		return driver.ErrBadConn
@@ -217,7 +215,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 	defer stop()
 
 	if c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
-		if err := c.client.Send(clientpkt.NewResetConnection(c.client.WriterBuf())); err != nil {
+		if err := c.client.Send(protocol.NewResetConnection(c.client.WriterBuf())); err != nil {
 			return err
 		}
 		response, err := c.client.ReadPacket()
@@ -225,7 +223,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 			return err
 		}
 		if len(response) > 0 && response[0] == 0xff {
-			return server.ParseErrorPacket(response)
+			return protocol.ParseErrorPacket(response)
 		}
 	}
 

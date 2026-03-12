@@ -21,7 +21,7 @@ go test ./tests/unit/
 
 ### Requirements
 
-- MariaDB (≥ 10.5 recommended) or MySQL server
+- MariaDB or MySQL server
 - A database the user can create/drop tables in (default: `testgo`)
 
 ### Environment variables

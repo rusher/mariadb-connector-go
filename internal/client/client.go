@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Client represents the internal MariaDB client implementation
@@ -133,7 +131,7 @@ func (c *Client) handshake(ctx context.Context) error {
 	}
 
 	// Parse handshake packet
-	handshake, err := server.ParseHandshakePacket(data)
+	handshake, err := protocol.ParseHandshakePacket(data)
 	if err != nil {
 		return fmt.Errorf("failed to parse handshake packet: %w", err)
 	}
@@ -145,7 +143,7 @@ func (c *Client) handshake(ctx context.Context) error {
 	c.context = NewContext(c.config, handshake, clientCaps)
 
 	// Build handshake response
-	response, err := server.BuildHandshakeResponse(
+	response, err := protocol.BuildHandshakeResponse(
 		c.config,
 		handshake,
 		clientCaps,
@@ -198,7 +196,7 @@ func (c *Client) setCharset() error {
 
 	// Send command (resets sequence)
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
+	if err := c.writer.Write(protocol.NewQuery(c.writer.Buf(), query)); err != nil {
 		return fmt.Errorf("failed to send SET NAMES query: %w", err)
 	}
 
@@ -210,12 +208,12 @@ func (c *Client) setCharset() error {
 
 	// Check for error packet
 	if len(data) > 0 && data[0] == 0xff {
-		return server.ParseErrorPacket(data)
+		return protocol.ParseErrorPacket(data)
 	}
 
 	// Should be OK packet - parse it to update context
 	if len(data) > 0 && data[0] == 0x00 {
-		_, _ = server.ParseOkPacket(data, c.context)
+		_, _ = protocol.ParseOkPacket(data, c.context)
 	}
 
 	return nil
@@ -252,7 +250,7 @@ func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, column
 	}
 
 	if len(response) > 0 && response[0] == 0xff {
-		return 0, 0, 0, server.ParseErrorPacket(response)
+		return 0, 0, 0, protocol.ParseErrorPacket(response)
 	}
 
 	if len(response) < 12 || response[0] != 0x00 {
@@ -308,7 +306,7 @@ func (c *Client) Close() error {
 
 	// Send COM_QUIT
 	if c.writer != nil {
-		c.writer.Write(clientpkt.NewQuit(c.writer.Buf())) //nolint:errcheck
+		c.writer.Write(protocol.NewQuit(c.writer.Buf())) //nolint:errcheck
 	}
 
 	if c.netConn != nil {
@@ -352,7 +350,7 @@ func (c *Client) ExecInternal(ctx context.Context, query string) error {
 	}
 	defer stop()
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
+	if err := c.writer.Write(protocol.NewQuery(c.writer.Buf(), query)); err != nil {
 		return err
 	}
 
@@ -362,7 +360,7 @@ func (c *Client) ExecInternal(ctx context.Context, query string) error {
 	}
 
 	if len(response) > 0 && response[0] == 0xff {
-		return server.ParseErrorPacket(response)
+		return protocol.ParseErrorPacket(response)
 	}
 
 	return nil

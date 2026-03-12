@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Copyright (c) 2026 MariaDB Corporation Ab
 
-package server
-
-import (
-	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-)
+package protocol
 
 // ContextUpdater interface for updating connection context
 type ContextUpdater interface {
@@ -14,18 +10,18 @@ type ContextUpdater interface {
 }
 
 // ParseOkPacket parses an OK packet from raw bytes into a Completion and updates context
-func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error) {
+func ParseOkPacket(data []byte, ctx ContextUpdater) (*Completion, error) {
 	_ = data[6]
 
 	pos := 1 // Skip 0x00 or 0xFE header
 
-	affectedRows, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	affectedRows, newPos, err := ReadLengthEncodedInteger(data, pos)
 	if err != nil {
 		return nil, err
 	}
 	pos = newPos
 
-	lastInsertId, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	lastInsertId, newPos, err := ReadLengthEncodedInteger(data, pos)
 	if err != nil {
 		return nil, err
 	}
@@ -42,20 +38,20 @@ func ParseOkPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error
 		ctx.SetWarningCount(int(warningCount))
 	}
 
-	completion := &protocol.Completion{}
+	completion := &Completion{}
 	return completion, fillOkPacket(data, ctx, pos, affectedRows, lastInsertId, serverStatus, warningCount, completion)
 }
 
 // FillOkPacket parses an OK packet into a pre-allocated Completion.
-func FillOkPacket(data []byte, ctx ContextUpdater, completion *protocol.Completion) error {
+func FillOkPacket(data []byte, ctx ContextUpdater, completion *Completion) error {
 	_ = data[6]
 	pos := 1
-	affectedRows, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	affectedRows, newPos, err := ReadLengthEncodedInteger(data, pos)
 	if err != nil {
 		return err
 	}
 	pos = newPos
-	lastInsertId, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+	lastInsertId, newPos, err := ReadLengthEncodedInteger(data, pos)
 	if err != nil {
 		return err
 	}
@@ -72,8 +68,8 @@ func FillOkPacket(data []byte, ctx ContextUpdater, completion *protocol.Completi
 	return fillOkPacket(data, ctx, pos, affectedRows, lastInsertId, serverStatus, warningCount, completion)
 }
 
-func fillOkPacket(data []byte, ctx ContextUpdater, pos int, affectedRows, lastInsertId uint64, serverStatus, warningCount uint16, completion *protocol.Completion) error {
-	*completion = protocol.Completion{
+func fillOkPacket(data []byte, ctx ContextUpdater, pos int, affectedRows, lastInsertId uint64, serverStatus, warningCount uint16, completion *Completion) error {
+	*completion = Completion{
 		AffectedRows: int64(affectedRows),
 		InsertID:     int64(lastInsertId),
 		ServerStatus: serverStatus,
@@ -82,7 +78,7 @@ func fillOkPacket(data []byte, ctx ContextUpdater, pos int, affectedRows, lastIn
 	}
 
 	if pos < len(data) {
-		info, newPos, err := protocol.ReadLengthEncodedString(data, pos)
+		info, newPos, err := ReadLengthEncodedString(data, pos)
 		if err == nil {
 			completion.Message = info
 			pos = newPos
@@ -90,7 +86,7 @@ func fillOkPacket(data []byte, ctx ContextUpdater, pos int, affectedRows, lastIn
 	}
 
 	if pos < len(data) {
-		stateLen, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+		stateLen, newPos, err := ReadLengthEncodedInteger(data, pos)
 		if err == nil {
 			pos = newPos
 			if pos+int(stateLen) <= len(data) {
@@ -110,7 +106,7 @@ func parseSessionState(data []byte, ctx ContextUpdater) {
 		stateType := data[pos]
 		pos++
 
-		stateDataLen, newPos, err := protocol.ReadLengthEncodedInteger(data, pos)
+		stateDataLen, newPos, err := ReadLengthEncodedInteger(data, pos)
 		if err != nil || newPos+int(stateDataLen) > len(data) {
 			break
 		}
@@ -118,8 +114,8 @@ func parseSessionState(data []byte, ctx ContextUpdater) {
 		pos += int(stateDataLen)
 
 		switch stateType {
-		case protocol.SESSION_TRACK_SCHEMA:
-		case protocol.SESSION_TRACK_SYSTEM_VARIABLES:
+		case SESSION_TRACK_SCHEMA:
+		case SESSION_TRACK_SYSTEM_VARIABLES:
 		default:
 		}
 	}
@@ -127,7 +123,7 @@ func parseSessionState(data []byte, ctx ContextUpdater) {
 
 // ParseEOFPacket parses a traditional EOF packet from raw bytes into a Completion and updates context.
 // Only called when CLIENT_DEPRECATE_EOF is not negotiated.
-func ParseEOFPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, error) {
+func ParseEOFPacket(data []byte, ctx ContextUpdater) (*Completion, error) {
 	_ = data[4]
 
 	pos := 1 // Skip 0xFE header
@@ -141,7 +137,7 @@ func ParseEOFPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, erro
 		ctx.SetWarningCount(int(warningCount))
 	}
 
-	return &protocol.Completion{
+	return &Completion{
 		WarningCount: warningCount,
 		ServerStatus: serverStatus,
 		Loaded:       true,
@@ -149,7 +145,7 @@ func ParseEOFPacket(data []byte, ctx ContextUpdater) (*protocol.Completion, erro
 }
 
 // FillEOFPacket parses a traditional EOF packet into a pre-allocated Completion.
-func FillEOFPacket(data []byte, ctx ContextUpdater, completion *protocol.Completion) error {
+func FillEOFPacket(data []byte, ctx ContextUpdater, completion *Completion) error {
 	_ = data[4]
 	pos := 1
 	warningCount := uint16(data[pos]) | uint16(data[pos+1])<<8
@@ -159,7 +155,7 @@ func FillEOFPacket(data []byte, ctx ContextUpdater, completion *protocol.Complet
 		ctx.SetServerStatus(serverStatus)
 		ctx.SetWarningCount(int(warningCount))
 	}
-	*completion = protocol.Completion{
+	*completion = Completion{
 		WarningCount: warningCount,
 		ServerStatus: serverStatus,
 		Loaded:       true,

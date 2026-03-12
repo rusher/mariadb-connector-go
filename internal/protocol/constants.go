@@ -184,19 +184,6 @@ const (
 	CHARSET_BINARY  = 63
 )
 
-// Default client capabilities (uint64 to support MariaDB extended capabilities)
-// Based on MariaDB Java connector ConnectionHelper.initializeBaseCapabilities()
-const DefaultClientCapabilities uint64 = IGNORE_SPACE |
-	CLIENT_PROTOCOL_41 |
-	TRANSACTIONS |
-	SECURE_CONNECTION |
-	MULTI_RESULTS |
-	PS_MULTI_RESULTS |
-	PLUGIN_AUTH |
-	CONNECT_ATTRS |
-	PLUGIN_AUTH_LENENC_CLIENT_DATA |
-	CLIENT_DEPRECATE_EOF
-
 // Compatibility aliases
 const (
 	CLIENT_LONG_PASSWORD                  = CLIENT_MYSQL
@@ -218,47 +205,3 @@ const (
 	CLIENT_CONNECT_ATTRS                  = CONNECT_ATTRS
 	CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = PLUGIN_AUTH_LENENC_CLIENT_DATA
 )
-
-// CapabilityConfig interface for capability initialization
-type CapabilityConfig interface {
-	AllowMultiStatements() bool
-	UseAffectedRows() bool
-	AllowLocalInfile() bool
-	UseCompression() bool
-	UseBulkStmts() bool
-}
-
-// InitializeClientCapabilities initializes client capabilities based on configuration
-func InitializeClientCapabilities(config CapabilityConfig, serverCapabilities uint64, database string) uint64 {
-	capabilities := IGNORE_SPACE |
-		CLIENT_PROTOCOL_41 |
-		TRANSACTIONS |
-		SECURE_CONNECTION |
-		MULTI_RESULTS |
-		PS_MULTI_RESULTS |
-		PLUGIN_AUTH |
-		CONNECT_ATTRS |
-		PLUGIN_AUTH_LENENC_CLIENT_DATA |
-		CLIENT_INTERACTIVE |
-		CACHE_METADATA |
-		EXTENDED_METADATA |
-		CLIENT_DEPRECATE_EOF
-
-	if !config.UseAffectedRows() {
-		capabilities |= FOUND_ROWS
-	}
-	if config.AllowMultiStatements() {
-		capabilities |= MULTI_STATEMENTS
-	}
-	if config.AllowLocalInfile() {
-		capabilities |= LOCAL_FILES
-	}
-	if config.UseCompression() {
-		capabilities |= COMPRESS
-	}
-	if database != "" {
-		capabilities |= CONNECT_WITH_DB
-	}
-
-	return capabilities & serverCapabilities
-}

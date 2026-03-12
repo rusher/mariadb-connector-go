@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Copyright (c) 2026 MariaDB Corporation Ab
 
-package server
+package protocol
 
 import "fmt"
 

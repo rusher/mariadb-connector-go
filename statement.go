@@ -9,7 +9,6 @@ import (
 	"fmt"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
 )
 
 // Stmt implements driver.Stmt interface
@@ -33,7 +32,7 @@ func (s *Stmt) Close() error {
 	}
 
 	// COM_STMT_CLOSE doesn't send a response
-	return s.conn.client.Send(clientpkt.NewStmtClose(s.conn.client.WriterBuf(), s.stmtID))
+	return s.conn.client.Send(protocol.NewStmtClose(s.conn.client.WriterBuf(), s.stmtID))
 }
 
 // NumInput returns the number of placeholder parameters.
@@ -61,7 +60,7 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 	}
 	defer stop()
 
-	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
+	execPkt, err := protocol.NewExecute(s.stmtID, args)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +102,7 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	}
 	defer stop()
 
-	execPkt, err := clientpkt.NewExecute(s.stmtID, args)
+	execPkt, err := protocol.NewExecute(s.stmtID, args)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +141,7 @@ func (s *Stmt) sendExec(execPkt []byte) error {
 
 // prepareInternal sends COM_STMT_PREPARE and reads the server response.
 func (s *Stmt) prepareInternal() error {
-	if err := s.conn.client.Send(clientpkt.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
+	if err := s.conn.client.Send(protocol.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
 		return err
 	}
 	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
@@ -160,8 +159,8 @@ func (s *Stmt) prepareInternal() error {
 // stmtID=0xFFFFFFFF as the sentinel value (MariaDB STMT_BULK_OPERATIONS).
 // Only called when CanPipelinePrepare() is true.
 func (s *Stmt) prepareAndExecute(execPkt []byte) error {
-	clientpkt.SetStmtID(execPkt, 0xFFFFFFFF)
-	if err := s.conn.client.Send(clientpkt.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
+	protocol.SetStmtID(execPkt, 0xFFFFFFFF)
+	if err := s.conn.client.Send(protocol.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
 		return err
 	}
 	if err := s.conn.client.SendNext(execPkt); err != nil {

@@ -9,7 +9,6 @@ import (
 	"reflect"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Rows implements driver.Rows interface.
@@ -172,15 +171,15 @@ func (r *Rows) fetchCurrentRows(c *protocol.Completion) (loaded bool, err error)
 
 		if len(data) > 0 && data[0] == 0xff {
 			r.closed = true
-			return false, server.ParseErrorPacket(data)
+			return false, protocol.ParseErrorPacket(data)
 		}
 
 		if len(data) > 0 && data[0] == 0xfe && len(data) < 0xffffff {
 			var term *protocol.Completion
 			if r.conn.context.IsEOFDeprecated() {
-				term, err = server.ParseOkPacket(data, r.conn.context)
+				term, err = protocol.ParseOkPacket(data, r.conn.context)
 			} else {
-				term, err = server.ParseEOFPacket(data, r.conn.context)
+				term, err = protocol.ParseEOFPacket(data, r.conn.context)
 			}
 			if err != nil {
 				r.closed = true
@@ -215,15 +214,15 @@ func (r *Rows) fetchRemainingRows(c *protocol.Completion) (loaded bool, err erro
 
 		if len(data) > 0 && data[0] == 0xff {
 			r.closed = true
-			return false, server.ParseErrorPacket(data)
+			return false, protocol.ParseErrorPacket(data)
 		}
 
 		if len(data) > 0 && data[0] == 0xfe && len(data) < 0xffffff {
 			var term *protocol.Completion
 			if r.conn.context.IsEOFDeprecated() {
-				term, err = server.ParseOkPacket(data, r.conn.context)
+				term, err = protocol.ParseOkPacket(data, r.conn.context)
 			} else {
-				term, err = server.ParseEOFPacket(data, r.conn.context)
+				term, err = protocol.ParseEOFPacket(data, r.conn.context)
 			}
 			if err != nil {
 				r.closed = true

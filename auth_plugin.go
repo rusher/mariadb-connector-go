@@ -5,15 +5,15 @@ package mariadb
 
 import (
 	"github.com/mariadb-connector-go/mariadb/internal/client"
+	authpkg "github.com/mariadb-connector-go/mariadb/internal/client/auth"
 )
 
 // AuthPlugin defines the interface for authentication plugins
-// This is exported for backward compatibility but delegates to internal client
-type AuthPlugin = client.AuthPlugin
+type AuthPlugin = authpkg.AuthPlugin
 
 // GetAuthPlugin retrieves an authentication plugin by name
 func GetAuthPlugin(name string) (AuthPlugin, bool) {
-	return client.GetAuthPlugin(name)
+	return authpkg.GetAuthPlugin(name)
 }
 
 // Config is exported for backward compatibility

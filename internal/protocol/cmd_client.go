@@ -1,23 +1,14 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Copyright (c) 2026 MariaDB Corporation Ab
 
-// Package clientpkt provides constructors for MySQL/MariaDB client-to-server packets.
-// Every function returns a []byte whose first 4 bytes are reserved for the packet
-// header (3-byte length + 1-byte sequence number).  The caller passes the slice
-// directly to PacketWriter.Write, which fills the header in-place and issues a
-// single Write syscall — no extra allocation, no extra copy.
-package clientpkt
+package protocol
 
 import (
 	"database/sql/driver"
 	"encoding/binary"
 	"reflect"
 	"time"
-
-	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
-
-const hdrSize = 4 // bytes reserved for packet header
 
 // NewQuery returns a COM_QUERY packet for the given SQL string.
 // buf is a caller-supplied scratch buffer (e.g. PacketWriter.Buf()): reused
@@ -29,7 +20,7 @@ func NewQuery(buf []byte, query string) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_QUERY
+	buf[hdrSize] = COM_QUERY
 	copy(buf[hdrSize+1:], query)
 	return buf
 }
@@ -44,7 +35,7 @@ func NewPrepare(buf []byte, query string) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_STMT_PREPARE
+	buf[hdrSize] = COM_STMT_PREPARE
 	copy(buf[hdrSize+1:], query)
 	return buf
 }
@@ -60,7 +51,7 @@ func NewExecute(stmtID uint32, args []driver.NamedValue) ([]byte, error) {
 	buf := make([]byte, 0, hdrSize+10+len(argSlice)*10)
 	buf = append(buf, 0, 0, 0, 0) // header reservation
 
-	buf = append(buf, protocol.COM_STMT_EXECUTE)
+	buf = append(buf, COM_STMT_EXECUTE)
 
 	// Statement ID (4 bytes)
 	buf = append(buf,
@@ -78,7 +69,7 @@ func NewExecute(stmtID uint32, args []driver.NamedValue) ([]byte, error) {
 		nullBitmapLen := (len(argSlice) + 7) / 8
 		nullBitmap := make([]byte, nullBitmapLen)
 		for i, arg := range argSlice {
-			if isNull(arg) {
+			if cmdIsNull(arg) {
 				nullBitmap[i/8] |= 1 << (i % 8)
 			}
 		}
@@ -87,15 +78,15 @@ func NewExecute(stmtID uint32, args []driver.NamedValue) ([]byte, error) {
 		buf = append(buf, 0x01) // new-params-bound flag
 
 		for _, arg := range argSlice {
-			ft, flags := paramType(arg)
+			ft, flags := cmdParamType(arg)
 			buf = append(buf, ft, flags)
 		}
 
 		for _, arg := range argSlice {
-			if isNull(arg) {
+			if cmdIsNull(arg) {
 				continue
 			}
-			enc, err := encodeParam(arg)
+			enc, err := EncodeParamValue(arg)
 			if err != nil {
 				return nil, err
 			}
@@ -123,7 +114,7 @@ func NewStmtClose(buf []byte, stmtID uint32) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_STMT_CLOSE
+	buf[hdrSize] = COM_STMT_CLOSE
 	binary.LittleEndian.PutUint32(buf[hdrSize+1:], stmtID)
 	return buf
 }
@@ -136,7 +127,7 @@ func NewPing(buf []byte) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_PING
+	buf[hdrSize] = COM_PING
 	return buf
 }
 
@@ -148,7 +139,7 @@ func NewQuit(buf []byte) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_QUIT
+	buf[hdrSize] = COM_QUIT
 	return buf
 }
 
@@ -160,13 +151,13 @@ func NewResetConnection(buf []byte) []byte {
 	} else {
 		buf = make([]byte, need)
 	}
-	buf[hdrSize] = protocol.COM_RESET_CONNECTION
+	buf[hdrSize] = COM_RESET_CONNECTION
 	return buf
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-func isNull(v interface{}) bool {
+func cmdIsNull(v interface{}) bool {
 	if v == nil {
 		return true
 	}
@@ -178,31 +169,26 @@ func isNull(v interface{}) bool {
 	return false
 }
 
-func paramType(arg interface{}) (byte, byte) {
+func cmdParamType(arg interface{}) (byte, byte) {
 	if arg == nil {
-		return protocol.MYSQL_TYPE_NULL, 0
+		return MYSQL_TYPE_NULL, 0
 	}
 	switch arg.(type) {
 	case int, int8, int16, int32, int64:
-		return protocol.MYSQL_TYPE_LONGLONG, 0
+		return MYSQL_TYPE_LONGLONG, 0
 	case uint, uint8, uint16, uint32, uint64:
-		return protocol.MYSQL_TYPE_LONGLONG, 0x80
+		return MYSQL_TYPE_LONGLONG, 0x80
 	case float32:
-		return protocol.MYSQL_TYPE_FLOAT, 0
+		return MYSQL_TYPE_FLOAT, 0
 	case float64:
-		return protocol.MYSQL_TYPE_DOUBLE, 0
+		return MYSQL_TYPE_DOUBLE, 0
 	case string:
-		return protocol.MYSQL_TYPE_VAR_STRING, 0
+		return MYSQL_TYPE_VAR_STRING, 0
 	case []byte:
-		return protocol.MYSQL_TYPE_BLOB, 0
+		return MYSQL_TYPE_BLOB, 0
 	case time.Time:
-		return protocol.MYSQL_TYPE_DATETIME, 0
+		return MYSQL_TYPE_DATETIME, 0
 	default:
-		return protocol.MYSQL_TYPE_VAR_STRING, 0
+		return MYSQL_TYPE_VAR_STRING, 0
 	}
-}
-
-func encodeParam(arg interface{}) ([]byte, error) {
-	// delegate to the existing encoder in protocol
-	return protocol.EncodeParamValue(arg)
 }

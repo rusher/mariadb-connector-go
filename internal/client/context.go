@@ -5,7 +5,6 @@ package client
 
 import (
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Context represents the current connection state
@@ -33,7 +32,7 @@ type Context struct {
 }
 
 // NewContext creates a new connection context from handshake
-func NewContext(config *Config, handshake *server.HandshakePacket, clientCaps uint64) *Context {
+func NewContext(config *Config, handshake *protocol.HandshakePacket, clientCaps uint64) *Context {
 	// Negotiated capabilities = client AND server
 	negotiatedCaps := clientCaps & handshake.ServerCapabilities
 

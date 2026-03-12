@@ -8,8 +8,6 @@ import (
 	"fmt"
 
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
-	clientpkt "github.com/mariadb-connector-go/mariadb/internal/protocol/client"
-	"github.com/mariadb-connector-go/mariadb/internal/protocol/server"
 )
 
 // Completion is an alias for protocol.Completion
@@ -47,12 +45,12 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 
 		// Error packet
 		if len(response) > 0 && response[0] == 0xff {
-			return nil, server.ParseErrorPacket(response)
+			return nil, protocol.ParseErrorPacket(response)
 		}
 
 		// OK packet (no result set)
 		if len(response) > 0 && response[0] == 0x00 {
-			completion, err := server.ParseOkPacket(response, c.context)
+			completion, err := protocol.ParseOkPacket(response, c.context)
 			if err != nil {
 				return nil, err
 			}
@@ -103,15 +101,15 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 			}
 
 			if len(rowData) > 0 && rowData[0] == 0xff {
-				return nil, server.ParseErrorPacket(rowData)
+				return nil, protocol.ParseErrorPacket(rowData)
 			}
 
 			// End of rows: fill the pre-allocated completion.
 			if len(rowData) > 0 && rowData[0] == 0xfe && len(rowData) < 0xffffff {
 				if c.context.IsEOFDeprecated() {
-					err = server.FillOkPacket(rowData, c.context, &comp)
+					err = protocol.FillOkPacket(rowData, c.context, &comp)
 				} else {
-					err = server.FillEOFPacket(rowData, c.context, &comp)
+					err = protocol.FillEOFPacket(rowData, c.context, &comp)
 				}
 				if err != nil {
 					return nil, err
@@ -154,15 +152,15 @@ func (c *Client) ReadRemainingRows(completion *protocol.Completion) ([]*protocol
 		}
 
 		if len(rowData) > 0 && rowData[0] == 0xff {
-			return nil, server.ParseErrorPacket(rowData)
+			return nil, protocol.ParseErrorPacket(rowData)
 		}
 
 		if len(rowData) > 0 && rowData[0] == 0xfe && len(rowData) < 0xffffff {
 			var term *protocol.Completion
 			if c.context.IsEOFDeprecated() {
-				term, err = server.ParseOkPacket(rowData, c.context)
+				term, err = protocol.ParseOkPacket(rowData, c.context)
 			} else {
-				term, err = server.ParseEOFPacket(rowData, c.context)
+				term, err = protocol.ParseEOFPacket(rowData, c.context)
 			}
 			if err != nil {
 				return nil, err
@@ -194,7 +192,7 @@ func (c *Client) Query(ctx context.Context, query string) ([]*protocol.Completio
 		return nil, err
 	}
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
+	if err := c.writer.Write(protocol.NewQuery(c.writer.Buf(), query)); err != nil {
 		return nil, err
 	}
 	return c.ReadCompletions(false, c.FetchSize())
@@ -211,7 +209,7 @@ func (c *Client) Exec(ctx context.Context, query string) ([]*protocol.Completion
 		return nil, err
 	}
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
+	if err := c.writer.Write(protocol.NewQuery(c.writer.Buf(), query)); err != nil {
 		return nil, err
 	}
 	return c.ReadCompletions(false, c.FetchSize())

@@ -256,3 +256,12 @@ func (c *Config) Clone() *Config {
 
 	return clone
 }
+
+// ── auth.PluginConfig implementation ─────────────────────────────────────────
+
+func (c *Config) GetPasswd() string                  { return c.Passwd }
+func (c *Config) GetAllowNativePasswords() bool      { return c.AllowNativePasswords }
+func (c *Config) GetAllowCleartextPasswords() bool   { return c.AllowCleartextPasswords }
+func (c *Config) HasTLS() bool                       { return c.TLS != nil || c.TLSConfig != "" }
+func (c *Config) GetServerPublicKey() *rsa.PublicKey { return c.ServerPublicKey }
+func (c *Config) GetAllowPublicKeyRetrieval() bool   { return c.AllowPublicKeyRetrieval }
