@@ -597,9 +597,7 @@ func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, 
 		vEnd := vStart + int(vLen)
 		// binary charset (63) → []byte; JSON is always text even with binary charset
 		if col.Charset == 63 && col.Type != MYSQL_TYPE_JSON {
-			cp := make([]byte, vLen)
-			copy(cp, data[vStart:vEnd])
-			return cp, vEnd, nil
+			return data[vStart:vEnd], vEnd, nil
 		}
 		return string(data[vStart:vEnd]), vEnd, nil
 
