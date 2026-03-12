@@ -33,7 +33,7 @@ func (s *Stmt) Close() error {
 	}
 
 	// COM_STMT_CLOSE doesn't send a response
-	return s.conn.client.Send(clientpkt.NewStmtClose(s.stmtID))
+	return s.conn.client.Send(clientpkt.NewStmtClose(s.conn.client.WriterBuf(), s.stmtID))
 }
 
 // NumInput returns the number of placeholder parameters.
@@ -142,7 +142,7 @@ func (s *Stmt) sendExec(execPkt []byte) error {
 
 // prepareInternal sends COM_STMT_PREPARE and reads the server response.
 func (s *Stmt) prepareInternal() error {
-	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
+	if err := s.conn.client.Send(clientpkt.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
 		return err
 	}
 	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
@@ -161,7 +161,7 @@ func (s *Stmt) prepareInternal() error {
 // Only called when CanPipelinePrepare() is true.
 func (s *Stmt) prepareAndExecute(execPkt []byte) error {
 	clientpkt.SetStmtID(execPkt, 0xFFFFFFFF)
-	if err := s.conn.client.Send(clientpkt.NewPrepare(s.query)); err != nil {
+	if err := s.conn.client.Send(clientpkt.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
 		return err
 	}
 	if err := s.conn.client.SendNext(execPkt); err != nil {

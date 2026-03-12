@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"time"
 	"unsafe"
 )
@@ -26,9 +27,9 @@ type ColumnDefinition struct {
 	// Cold-path: name decoded lazily / zero-copy (only Columns() call)
 	raw  []byte // keeps packet backing array alive so Name remains valid
 	Name string // zero-copy via unsafe.String — no allocation
-	// Extended metadata (rare: MARIADB_CLIENT_EXTENDED_TYPE_INFO)
-	ExtendedType string
-	Format       string
+	// Extended metadata (zero-copy slices into the packet buffer kept alive by raw)
+	ExtendedType []byte
+	Format       []byte
 }
 
 // skipLengthEncoded advances pos past a length-encoded string without allocating.
@@ -48,7 +49,16 @@ func skipLengthEncoded(data []byte, pos int) (int, error) {
 // Catalog, Schema, Table, OrgTable and OrgName are skipped to avoid allocations.
 // Name is decoded zero-copy: it aliases the packet bytes via unsafe.String so no
 // string allocation occurs. col.raw keeps the packet backing array alive.
-func FillColumnDefinition(data []byte, col *ColumnDefinition) error {
+//
+// extMetadata must be true when the EXTENDED_METADATA capability was negotiated.
+// The server then inserts an optional tagged block between the 6 strings and the
+// fixed fields, matching the Java connector ColumnDecoder.decode() logic:
+//
+//	0x00        → no extended info
+//	<lenenc N>  → N-byte sub-packet of {tag(1) + lenenc-string} items
+//	              tag 0 = ExtendedType (e.g. "uuid")
+//	              tag 1 = Format
+func FillColumnDefinition(data []byte, col *ColumnDefinition, extMetadata bool) error {
 	pos := 0
 
 	var err error
@@ -76,7 +86,46 @@ func FillColumnDefinition(data []byte, col *ColumnDefinition) error {
 		return fmt.Errorf("failed to skip org_name: %w", err)
 	}
 
-	// Length of fixed-length fields (1 byte)
+	// Extended metadata block — present only when EXTENDED_METADATA was negotiated.
+	// Layout: one byte that is either 0x00 (no info) or the first byte of a
+	// length-encoded integer giving the total size of the sub-packet that follows.
+	if extMetadata {
+		if pos >= len(data) {
+			return fmt.Errorf("column definition truncated before extended metadata marker")
+		}
+		if data[pos] != 0x00 {
+			// Revert and read the whole block as a length-encoded byte sequence.
+			blockLen, blockStart, err2 := ReadLengthEncodedInteger(data, pos)
+			if err2 != nil {
+				return fmt.Errorf("failed to read extended metadata block length: %w", err2)
+			}
+			blockEnd := blockStart + int(blockLen)
+			if blockEnd > len(data) {
+				return fmt.Errorf("extended metadata block exceeds packet boundary")
+			}
+			for sub := blockStart; sub < blockEnd; {
+				tag := data[sub]
+				sub++
+				vLen, vStart, err3 := ReadLengthEncodedInteger(data, sub)
+				if err3 != nil {
+					break
+				}
+				vEnd := vStart + int(vLen)
+				switch tag {
+				case 0:
+					col.ExtendedType = data[vStart:vEnd]
+				case 1:
+					col.Format = data[vStart:vEnd]
+				}
+				sub = vEnd
+			}
+			pos = blockEnd
+		} else {
+			pos++ // consume the 0x00 no-extended-info marker
+		}
+	}
+
+	// Fixed-length fields marker (always 0x0c = 12)
 	fixedLen := data[pos]
 	pos++
 
@@ -100,32 +149,8 @@ func FillColumnDefinition(data []byte, col *ColumnDefinition) error {
 
 	// Decimals (1 byte)
 	col.Decimals = data[pos]
-	pos++
-
-	if pos < len(data) {
-		extType, newPos, err2 := ReadLengthEncodedString(data, pos)
-		if err2 == nil && extType != "" {
-			col.ExtendedType = extType
-			pos = newPos
-		}
-		if pos < len(data) {
-			format, _, err2 := ReadLengthEncodedString(data, pos)
-			if err2 == nil && format != "" {
-				col.Format = format
-			}
-		}
-	}
 
 	return nil
-}
-
-// ParseColumnDefinition parses a column definition packet into a new ColumnDefinition.
-func ParseColumnDefinition(data []byte) (*ColumnDefinition, error) {
-	col := &ColumnDefinition{}
-	if err := FillColumnDefinition(data, col); err != nil {
-		return nil, err
-	}
-	return col, nil
 }
 
 // TypeToString converts a MySQL type to a string
@@ -230,7 +255,7 @@ func TypeToScanTypeWithColumn(col *ColumnDefinition) reflect.Type {
 	}
 }
 
-// ParseTextRow parses a row in text protocol
+// ParseTextRow parses a row in text protocol, returning typed Go values.
 func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error) {
 	values := make([]interface{}, len(columns))
 	pos := 0
@@ -242,20 +267,174 @@ func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error
 			continue
 		}
 
-		str, newPos, err := ReadLengthEncodedString(data, pos)
+		vLen, vStart, err := ReadLengthEncodedInteger(data, pos)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 		}
-		pos = newPos
+		vEnd := vStart + int(vLen)
+		pos = vEnd
 
-		if columns[i].Type == MYSQL_TYPE_TINY && columns[i].Length == 1 {
-			values[i] = str != "0" && str != ""
-		} else {
-			values[i] = str
+		raw := data[vStart:vEnd]
+		col := &columns[i]
+		switch col.Type {
+		case MYSQL_TYPE_TINY:
+			if col.Length == 1 {
+				values[i] = vLen > 0 && raw[0] != '0'
+			} else {
+				values[i] = textInt64(raw)
+			}
+		case MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_YEAR:
+			values[i] = textInt64(raw)
+		case MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE:
+			values[i] = textFloat64(raw)
+		case MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL:
+			values[i] = string(raw)
+		case MYSQL_TYPE_DATE, MYSQL_TYPE_NEWDATE:
+			values[i] = textDate(raw)
+		case MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP:
+			values[i] = textDatetime(raw)
+		case MYSQL_TYPE_TIME:
+			values[i] = textDuration(raw)
+		case MYSQL_TYPE_JSON:
+			values[i] = string(raw)
+		default: // VARCHAR, BLOB, BIT, ENUM, SET, GEOMETRY, …
+			if col.Charset == 63 { // binary charset → []byte (zero-copy)
+				values[i] = raw
+			} else {
+				values[i] = string(raw)
+			}
 		}
 	}
 
 	return values, nil
+}
+
+// ── text-protocol parsing helpers (zero-alloc) ───────────────────────────────
+
+// textInt64 parses a decimal integer (optionally signed) from ASCII bytes.
+func textInt64(raw []byte) int64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	neg := raw[0] == '-'
+	start := 0
+	if neg {
+		start = 1
+	}
+	var v int64
+	for _, b := range raw[start:] {
+		v = v*10 + int64(b-'0')
+	}
+	if neg {
+		return -v
+	}
+	return v
+}
+
+// textFloat64 parses a floating-point value from ASCII bytes (zero-copy).
+func textFloat64(raw []byte) float64 {
+	f, _ := strconv.ParseFloat(unsafe.String(unsafe.SliceData(raw), len(raw)), 64)
+	return f
+}
+
+// textDate parses "YYYY-MM-DD" → time.Time or nil for zero dates.
+func textDate(raw []byte) interface{} {
+	if len(raw) < 10 {
+		return nil
+	}
+	y := textDig4(raw, 0)
+	mo := textDig2(raw, 5)
+	d := textDig2(raw, 8)
+	if y == 0 && mo == 0 && d == 0 {
+		return nil
+	}
+	return time.Date(y, time.Month(mo), d, 0, 0, 0, 0, time.UTC)
+}
+
+// textDatetime parses "YYYY-MM-DD HH:MM:SS[.micro]" → time.Time or nil.
+func textDatetime(raw []byte) interface{} {
+	if len(raw) < 19 {
+		return nil
+	}
+	y := textDig4(raw, 0)
+	mo := textDig2(raw, 5)
+	d := textDig2(raw, 8)
+	h := textDig2(raw, 11)
+	mi := textDig2(raw, 14)
+	s := textDig2(raw, 17)
+	ns := 0
+	if len(raw) > 20 && raw[19] == '.' {
+		frac := raw[20:]
+		micro := 0
+		for k, b := range frac {
+			if k >= 6 {
+				break
+			}
+			micro = micro*10 + int(b-'0')
+		}
+		for k := len(frac); k < 6; k++ {
+			micro *= 10
+		}
+		ns = micro * 1000
+	}
+	if y == 0 && mo == 0 && d == 0 {
+		return nil
+	}
+	return time.Date(y, time.Month(mo), d, h, mi, s, ns, time.UTC)
+}
+
+// textDuration parses "[-]H+:MM:SS[.micro]" → time.Duration.
+func textDuration(raw []byte) time.Duration {
+	if len(raw) == 0 {
+		return 0
+	}
+	neg := raw[0] == '-'
+	s := raw
+	if neg {
+		s = raw[1:]
+	}
+	// hours can exceed 2 digits (max TIME is 838:59:59)
+	colon := 0
+	for colon < len(s) && s[colon] != ':' {
+		colon++
+	}
+	if len(s) < colon+6 {
+		return 0
+	}
+	h := textInt64(s[:colon])
+	mi := int64(textDig2(s, colon+1))
+	se := int64(textDig2(s, colon+4))
+	var micros int64
+	if len(s) > colon+6 && s[colon+6] == '.' {
+		frac := s[colon+7:]
+		for k, b := range frac {
+			if k >= 6 {
+				break
+			}
+			micros = micros*10 + int64(b-'0')
+		}
+		for k := len(frac); k < 6; k++ {
+			micros *= 10
+		}
+	}
+	dur := time.Duration(h)*time.Hour +
+		time.Duration(mi)*time.Minute +
+		time.Duration(se)*time.Second +
+		time.Duration(micros)*time.Microsecond
+	if neg {
+		return -dur
+	}
+	return dur
+}
+
+// textDig4 reads a 4-digit decimal integer at offset off (no bounds check).
+func textDig4(b []byte, off int) int {
+	return int(b[off]-'0')*1000 + int(b[off+1]-'0')*100 + int(b[off+2]-'0')*10 + int(b[off+3]-'0')
+}
+
+// textDig2 reads a 2-digit decimal integer at offset off (no bounds check).
+func textDig2(b []byte, off int) int {
+	return int(b[off]-'0')*10 + int(b[off+1]-'0')
 }
 
 // ParseBinaryRow parses a row in binary protocol (prepared statement)
@@ -411,11 +590,18 @@ func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, 
 		MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL,
 		MYSQL_TYPE_BLOB, MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB,
 		MYSQL_TYPE_BIT, MYSQL_TYPE_ENUM, MYSQL_TYPE_SET, MYSQL_TYPE_GEOMETRY, MYSQL_TYPE_JSON:
-		str, newPos, err := ReadLengthEncodedString(data, pos)
+		vLen, vStart, err := ReadLengthEncodedInteger(data, pos)
 		if err != nil {
 			return nil, pos, err
 		}
-		return str, newPos, nil
+		vEnd := vStart + int(vLen)
+		// binary charset (63) → []byte; JSON is always text even with binary charset
+		if col.Charset == 63 && col.Type != MYSQL_TYPE_JSON {
+			cp := make([]byte, vLen)
+			copy(cp, data[vStart:vEnd])
+			return cp, vEnd, nil
+		}
+		return string(data[vStart:vEnd]), vEnd, nil
 
 	default:
 		return nil, pos, fmt.Errorf("unsupported field type: %d", col.Type)

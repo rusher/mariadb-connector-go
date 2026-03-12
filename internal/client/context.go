@@ -24,8 +24,9 @@ type Context struct {
 	autoIncrement             *int64
 
 	// Capability-derived flags
-	eofDeprecated bool
-	skipMeta      bool
+	eofDeprecated    bool
+	skipMeta         bool
+	extendedMetadata bool
 
 	// Configuration
 	config *Config
@@ -48,6 +49,7 @@ func NewContext(config *Config, handshake *server.HandshakePacket, clientCaps ui
 	// Set capability-derived flags
 	ctx.eofDeprecated = ctx.HasClientCapability(protocol.CLIENT_DEPRECATE_EOF)
 	ctx.skipMeta = ctx.HasClientCapability(protocol.CACHE_METADATA)
+	ctx.extendedMetadata = ctx.HasClientCapability(protocol.EXTENDED_METADATA)
 
 	return ctx
 }
@@ -111,6 +113,11 @@ func (c *Context) IsEOFDeprecated() bool {
 // CanSkipMeta returns whether metadata can be skipped
 func (c *Context) CanSkipMeta() bool {
 	return c.skipMeta
+}
+
+// IsExtendedMetadata returns whether extended column metadata (EXTENDED_METADATA) was negotiated
+func (c *Context) IsExtendedMetadata() bool {
+	return c.extendedMetadata
 }
 
 // GetWarningCount returns the warning count

@@ -22,6 +22,7 @@ type PacketReader struct {
 	sequence *uint8  // Shared sequence pointer
 	logger   Logger  // Debug logger
 	hdr      [4]byte // reused per-call to avoid per-read heap allocation
+	scratch  []byte  // reusable buffer for transient reads (do not retain across calls)
 }
 
 // NewPacketReader creates a new PacketReader with shared sequence
@@ -31,6 +32,49 @@ func NewPacketReader(r io.Reader, seq *uint8) *PacketReader {
 		sequence: seq,
 		logger:   GetLogger(),
 	}
+}
+
+// ReadScratch reads a packet reusing an internal buffer. The returned slice is
+// valid only until the next ReadScratch call — callers must not retain it.
+// Use for packets whose payload is consumed immediately (column defs, EOF, OK).
+func (pr *PacketReader) ReadScratch() ([]byte, error) {
+	if _, err := io.ReadFull(pr.reader, pr.hdr[:]); err != nil {
+		return nil, fmt.Errorf("failed to read packet header: %w", err)
+	}
+
+	length := int(pr.hdr[0]) | int(pr.hdr[1])<<8 | int(pr.hdr[2])<<16
+	sequence := pr.hdr[3]
+	if sequence != *pr.sequence {
+		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", *pr.sequence, sequence)
+	}
+	receivedSeq := *pr.sequence
+	*pr.sequence++
+
+	if cap(pr.scratch) >= length {
+		pr.scratch = pr.scratch[:length]
+	} else {
+		pr.scratch = make([]byte, length)
+	}
+	if _, err := io.ReadFull(pr.reader, pr.scratch); err != nil {
+		return nil, fmt.Errorf("failed to read packet data: %w", err)
+	}
+
+	// Multi-packet: fall back to a fresh allocation since we must concatenate.
+	if length == MaxPacketSize {
+		more, err := pr.ReadPacket()
+		if err != nil {
+			return nil, err
+		}
+		data := make([]byte, length+len(more))
+		copy(data, pr.scratch)
+		copy(data[length:], more)
+		return data, nil
+	}
+
+	if pr.logger.IsEnabled() {
+		pr.logger.LogReceive(pr.scratch, receivedSeq)
+	}
+	return pr.scratch, nil
 }
 
 // ReadPacket reads a single packet from the connection
@@ -93,6 +137,7 @@ type PacketWriter struct {
 	sequence *uint8  // Shared sequence pointer
 	logger   Logger  // Debug logger
 	hdr      [4]byte // reused per-call to avoid per-write heap allocation
+	scratch  []byte  // reusable send buffer — do not retain across Write calls
 }
 
 // NewPacketWriter creates a new PacketWriter with shared sequence
@@ -101,7 +146,15 @@ func NewPacketWriter(w io.Writer, seq *uint8) *PacketWriter {
 		writer:   w,
 		sequence: seq,
 		logger:   GetLogger(),
+		scratch:  make([]byte, 16*1024),
 	}
+}
+
+// Buf returns the writer's scratch buffer for use by packet constructors.
+// The capacity is 16 KiB; packet builders use it in-place when the payload fits.
+// The returned slice must not be retained across Write calls.
+func (pw *PacketWriter) Buf() []byte {
+	return pw.scratch
 }
 
 // WritePacket writes a single packet to the connection

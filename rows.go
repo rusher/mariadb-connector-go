@@ -18,8 +18,9 @@ import (
 type Rows struct {
 	conn        *Conn
 	completions []*protocol.Completion
-	idx         int // current completion index
-	rowPos      int // position within current completion's pre-fetched Rows slice
+	idx         int      // current completion index
+	rowPos      int      // position within current completion's pre-fetched Rows slice
+	colNames    []string // cached column name slice for the current result set
 	closed      bool
 }
 
@@ -39,13 +40,18 @@ func (r *Rows) cols() []protocol.ColumnDefinition {
 	return nil
 }
 
-// Columns returns the names of the columns
+// Columns returns the names of the columns, caching the result for the
+// current result set so repeated calls do not allocate a new slice.
 func (r *Rows) Columns() []string {
+	if r.colNames != nil {
+		return r.colNames
+	}
 	cols := r.cols()
 	names := make([]string, len(cols))
 	for i, col := range cols {
 		names[i] = col.Name
 	}
+	r.colNames = names
 	return names
 }
 
@@ -275,7 +281,6 @@ func (r *Rows) HasNextResultSet() bool {
 // NextResultSet advances to the next result set, skipping non-result-set completions
 func (r *Rows) NextResultSet() error {
 	for {
-
 		r.idx++
 		if r.idx >= len(r.completions) {
 			return io.EOF
@@ -283,6 +288,7 @@ func (r *Rows) NextResultSet() error {
 		c := r.completions[r.idx]
 		if c.HasResultSet() {
 			r.rowPos = 0
+			r.colNames = nil // invalidate column name cache for new result set
 			if !c.Loaded {
 				r.conn.client.SetActiveRows(r)
 			}

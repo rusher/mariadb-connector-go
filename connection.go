@@ -187,7 +187,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 	}
 	defer stop()
 
-	if err := c.client.Send(clientpkt.NewPing()); err != nil {
+	if err := c.client.Send(clientpkt.NewPing(c.client.WriterBuf())); err != nil {
 		return err
 	}
 
@@ -217,7 +217,7 @@ func (c *Conn) ResetSession(ctx context.Context) error {
 	defer stop()
 
 	if c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
-		if err := c.client.Send(clientpkt.NewResetConnection()); err != nil {
+		if err := c.client.Send(clientpkt.NewResetConnection(c.client.WriterBuf())); err != nil {
 			return err
 		}
 		response, err := c.client.ReadPacket()

@@ -198,7 +198,7 @@ func (c *Client) setCharset() error {
 
 	// Send command (resets sequence)
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
 		return fmt.Errorf("failed to send SET NAMES query: %w", err)
 	}
 
@@ -234,6 +234,12 @@ func (c *Client) Send(buf []byte) error {
 // Must be called with client mutex locked.
 func (c *Client) SendNext(buf []byte) error {
 	return c.writer.Write(buf)
+}
+
+// WriterBuf returns the writer's scratch buffer for use by packet constructors.
+// The returned slice must not be retained across Write calls.
+func (c *Client) WriterBuf() []byte {
+	return c.writer.Buf()
 }
 
 // ReadPrepareResponse reads and parses a COM_STMT_PREPARE response.
@@ -302,7 +308,7 @@ func (c *Client) Close() error {
 
 	// Send COM_QUIT
 	if c.writer != nil {
-		c.writer.Write(clientpkt.NewQuit()) //nolint:errcheck
+		c.writer.Write(clientpkt.NewQuit(c.writer.Buf())) //nolint:errcheck
 	}
 
 	if c.netConn != nil {
@@ -346,7 +352,7 @@ func (c *Client) ExecInternal(ctx context.Context, query string) error {
 	}
 	defer stop()
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
 		return err
 	}
 

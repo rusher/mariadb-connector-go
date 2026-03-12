@@ -39,7 +39,8 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 	completions := make([]*protocol.Completion, 0, 1)
 
 	for {
-		response, err := c.reader.ReadPacket()
+		// Use scratch buffer: this packet is always consumed immediately.
+		response, err := c.reader.ReadScratch()
 		if err != nil {
 			return nil, err
 		}
@@ -70,31 +71,27 @@ func (c *Client) ReadCompletions(binary bool, fetchSize int) ([]*protocol.Comple
 		}
 
 		// Read column definitions — value slice: one allocation for all N columns.
+		// Use ReadScratch: FillColumnDefinition copies all strings out of the buffer.
 		columns := make([]protocol.ColumnDefinition, columnCount)
 		for i := 0; i < int(columnCount); i++ {
 			colData, err := c.reader.ReadPacket()
 			if err != nil {
 				return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 			}
-			if err := protocol.FillColumnDefinition(colData, &columns[i]); err != nil {
+			if err := protocol.FillColumnDefinition(colData, &columns[i], c.context.IsExtendedMetadata()); err != nil {
 				return nil, fmt.Errorf("failed to parse column %d: %w", i, err)
 			}
 		}
 
 		// Read EOF after column definitions (if not CLIENT_DEPRECATE_EOF)
 		if !c.context.IsEOFDeprecated() {
-			eofData, err := c.reader.ReadPacket()
+			_, err := c.reader.ReadScratch()
 			if err != nil {
 				return nil, fmt.Errorf("failed to read column EOF: %w", err)
 			}
-			_, _ = server.ParseEOFPacket(eofData, c.context)
 		}
 
-		capHint := fetchSize
-		if capHint <= 0 {
-			capHint = 16
-		}
-		rows := make([][]byte, 0, capHint)
+		rows := make([][]byte, 0, 1)
 
 		// Pre-allocate the completion for the terminating EOF/OK packet.
 		comp := protocol.Completion{}
@@ -197,7 +194,7 @@ func (c *Client) Query(ctx context.Context, query string) ([]*protocol.Completio
 		return nil, err
 	}
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
 		return nil, err
 	}
 	return c.ReadCompletions(false, c.FetchSize())
@@ -214,7 +211,7 @@ func (c *Client) Exec(ctx context.Context, query string) ([]*protocol.Completion
 		return nil, err
 	}
 	c.sequence = 0
-	if err := c.writer.Write(clientpkt.NewQuery(query)); err != nil {
+	if err := c.writer.Write(clientpkt.NewQuery(c.writer.Buf(), query)); err != nil {
 		return nil, err
 	}
 	return c.ReadCompletions(false, c.FetchSize())

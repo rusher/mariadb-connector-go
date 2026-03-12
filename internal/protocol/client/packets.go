@@ -20,16 +20,30 @@ import (
 const hdrSize = 4 // bytes reserved for packet header
 
 // NewQuery returns a COM_QUERY packet for the given SQL string.
-func NewQuery(query string) []byte {
-	buf := make([]byte, hdrSize+1+len(query))
+// buf is a caller-supplied scratch buffer (e.g. PacketWriter.Buf()): reused
+// in-place when its capacity is sufficient, otherwise a fresh slice is allocated.
+func NewQuery(buf []byte, query string) []byte {
+	need := hdrSize + 1 + len(query)
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_QUERY
 	copy(buf[hdrSize+1:], query)
 	return buf
 }
 
 // NewPrepare returns a COM_STMT_PREPARE packet.
-func NewPrepare(query string) []byte {
-	buf := make([]byte, hdrSize+1+len(query))
+// buf is a caller-supplied scratch buffer (e.g. PacketWriter.Buf()): reused
+// in-place when its capacity is sufficient, otherwise a fresh slice is allocated.
+func NewPrepare(buf []byte, query string) []byte {
+	need := hdrSize + 1 + len(query)
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_STMT_PREPARE
 	copy(buf[hdrSize+1:], query)
 	return buf
@@ -102,30 +116,50 @@ func SetStmtID(buf []byte, stmtID uint32) {
 }
 
 // NewStmtClose returns a COM_STMT_CLOSE packet.
-func NewStmtClose(stmtID uint32) []byte {
-	buf := make([]byte, hdrSize+5)
+func NewStmtClose(buf []byte, stmtID uint32) []byte {
+	const need = hdrSize + 5
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_STMT_CLOSE
 	binary.LittleEndian.PutUint32(buf[hdrSize+1:], stmtID)
 	return buf
 }
 
 // NewPing returns a COM_PING packet.
-func NewPing() []byte {
-	buf := make([]byte, hdrSize+1)
+func NewPing(buf []byte) []byte {
+	const need = hdrSize + 1
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_PING
 	return buf
 }
 
 // NewQuit returns a COM_QUIT packet.
-func NewQuit() []byte {
-	buf := make([]byte, hdrSize+1)
+func NewQuit(buf []byte) []byte {
+	const need = hdrSize + 1
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_QUIT
 	return buf
 }
 
 // NewResetConnection returns a COM_RESET_CONNECTION packet.
-func NewResetConnection() []byte {
-	buf := make([]byte, hdrSize+1)
+func NewResetConnection(buf []byte) []byte {
+	const need = hdrSize + 1
+	if cap(buf) >= need {
+		buf = buf[:need]
+	} else {
+		buf = make([]byte, need)
+	}
 	buf[hdrSize] = protocol.COM_RESET_CONNECTION
 	return buf
 }
