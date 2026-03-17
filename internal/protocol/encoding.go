@@ -8,40 +8,46 @@ import (
 	"fmt"
 )
 
-// ReadLengthEncodedInteger reads a length-encoded integer
-func ReadLengthEncodedInteger(data []byte, pos int) (uint64, int, error) {
+// NullLength is the sentinel value returned by ReadLengthEncodedInteger when the
+// length-encoded field carries the NULL marker (0xfb). Callers must check for
+// this value before using the length to index into a data slice.
+const NullLength = ^uint64(0)
+
+// ReadLengthEncodedInteger reads a length-encoded integer.
+// Returns (NullLength, newPos) for the NULL marker (0xfb).
+func ReadLengthEncodedInteger(data []byte, pos int) (uint64, int) {
 	first := data[pos]
 	pos++
 
 	switch {
 	case first < 0xfb:
-		return uint64(first), pos, nil
+		return uint64(first), pos
+
+	case first == 0xfb:
+		return NullLength, pos
 
 	case first == 0xfc:
 		_ = data[pos+1]
 		val := uint64(data[pos]) | uint64(data[pos+1])<<8
-		return val, pos + 2, nil
+		return val, pos + 2
 
 	case first == 0xfd:
 		_ = data[pos+2]
 		val := uint64(data[pos]) | uint64(data[pos+1])<<8 | uint64(data[pos+2])<<16
-		return val, pos + 3, nil
+		return val, pos + 3
 
-	case first == 0xfe:
+	default: // 0xfe
 		_ = data[pos+7]
 		val := binary.LittleEndian.Uint64(data[pos : pos+8])
-		return val, pos + 8, nil
-
-	default:
-		return 0, pos, fmt.Errorf("invalid length-encoded integer marker: 0x%x", first)
+		return val, pos + 8
 	}
 }
 
 // ReadLengthEncodedString reads a length-encoded string
 func ReadLengthEncodedString(data []byte, pos int) (string, int, error) {
-	length, newPos, err := ReadLengthEncodedInteger(data, pos)
-	if err != nil {
-		return "", pos, err
+	length, newPos := ReadLengthEncodedInteger(data, pos)
+	if length == NullLength {
+		return "", newPos, nil
 	}
 	if length > 0 {
 		_ = data[newPos+int(length)-1]
@@ -73,7 +79,7 @@ func WriteLengthEncodedInteger(buf []byte, value uint64) []byte {
 // WriteLengthEncodedString writes a length-encoded string
 func WriteLengthEncodedString(buf []byte, str string) []byte {
 	buf = WriteLengthEncodedInteger(buf, uint64(len(str)))
-	return append(buf, []byte(str)...)
+	return append(buf, str...)
 }
 
 // ReadNullTerminatedString reads a null-terminated string

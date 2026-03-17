@@ -64,6 +64,11 @@ func (c *Context) CanPipelinePrepare() bool {
 	return c.internal.CanPipelinePrepare()
 }
 
+// NoBackslashEscapes reports whether the server's NO_BACKSLASH_ESCAPES SQL mode is active.
+func (c *Context) NoBackslashEscapes() bool {
+	return c.internal.NoBackslashEscapes()
+}
+
 // IsEOFDeprecated returns whether EOF packets are deprecated
 func (c *Context) IsEOFDeprecated() bool {
 	return c.internal.IsEOFDeprecated()

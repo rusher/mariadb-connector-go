@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"time"
 
 	"github.com/mariadb-connector-go/mariadb/internal/client"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
@@ -53,8 +54,9 @@ func (c *Conn) Prepare(query string) (driver.Stmt, error) {
 	}
 
 	stmt := &Stmt{
-		conn:  c,
-		query: query,
+		conn:   c,
+		query:  query,
+		stmtID: 0xFFFFFFFF,
 	}
 
 	if !c.context.CanPipelinePrepare() {
@@ -124,23 +126,9 @@ func (c *Conn) ExecContext(ctx context.Context, query string, args []driver.Name
 		return nil, driver.ErrBadConn
 	}
 
-	if len(args) > 0 {
-		return nil, driver.ErrSkip // Use prepared statement for queries with args
-	}
-
-	completions, err := c.client.Exec(ctx, query)
+	result, err := c.client.Exec(ctx, query, args, c.context.NoBackslashEscapes())
 	if err != nil {
 		return nil, err
-	}
-
-	var result *protocol.Completion
-	for _, comp := range completions {
-		if !comp.HasResultSet() {
-			result = comp
-		}
-	}
-	if result == nil {
-		result = &protocol.Completion{}
 	}
 	return result, nil
 }
@@ -151,24 +139,18 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 		return nil, driver.ErrBadConn
 	}
 
-	if len(args) > 0 {
-		return nil, driver.ErrSkip
-	}
-
-	completions, err := c.client.Query(ctx, query)
+	comp, err := c.client.Query(ctx, query, args, c.context.NoBackslashEscapes())
 	if err != nil {
 		return nil, err
 	}
-
-	if !hasResultSet(completions) {
+	if !comp.HasResultSet() {
 		return nil, fmt.Errorf("query did not return a result set")
 	}
-
 	rows := &Rows{
-		conn:        c,
-		completions: completions,
+		conn:    c,
+		current: comp,
 	}
-	if !completions[0].Loaded {
+	if !comp.Loaded {
 		c.client.SetActiveRows(rows)
 	}
 	return rows, nil
@@ -189,7 +171,7 @@ func (c *Conn) Ping(ctx context.Context) error {
 		return err
 	}
 
-	response, err := c.client.ReadPacket()
+	response, err := c.client.ReadScratch()
 	if err != nil {
 		return driver.ErrBadConn
 	}
@@ -203,30 +185,48 @@ func (c *Conn) Ping(ctx context.Context) error {
 }
 
 // ResetSession is called prior to executing a query on the connection
-// if the connection has been used before
+// if the connection has been used before.
+//
+// Validation strategy:
+//  1. Hard checks: closed client or dead socket → ErrBadConn immediately.
+//  2. Skip check: if the last completed exchange was less than MinDelayValidation
+//     ago, the connection is assumed healthy and no packet is sent.
+//  3. Active check: send COM_PING (or COM_RESET_CONNECTION if
+//     ResetConnectionOnBorrow=true and the server supports it) and expect OK.
 func (c *Conn) ResetSession(ctx context.Context) error {
 	if c.client.IsClosed() {
 		return driver.ErrBadConn
 	}
+
+	cfg := c.client.Config()
+	minDelay := cfg.MinDelayValidation
+	if minDelay > 0 && time.Since(c.client.Context().LastExchange()) < minDelay {
+		return nil
+	}
+
 	stop, err := c.client.WithContext(ctx)
 	if err != nil {
 		return driver.ErrBadConn
 	}
 	defer stop()
 
-	if c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
+	if cfg.ResetConnectionOnBorrow && c.context.HasClientCapability(protocol.CLIENT_SESSION_TRACK) {
 		if err := c.client.Send(protocol.NewResetConnection(c.client.WriterBuf())); err != nil {
-			return err
+			return driver.ErrBadConn
 		}
-		response, err := c.client.ReadPacket()
-		if err != nil {
-			return err
-		}
-		if len(response) > 0 && response[0] == 0xff {
-			return protocol.ParseErrorPacket(response)
+	} else {
+		if err := c.client.Send(protocol.NewPing(c.client.WriterBuf())); err != nil {
+			return driver.ErrBadConn
 		}
 	}
 
+	response, err := c.client.ReadScratch()
+	if err != nil {
+		return driver.ErrBadConn
+	}
+	if len(response) > 0 && response[0] == 0xff {
+		return protocol.ParseErrorPacket(response)
+	}
 	return nil
 }
 

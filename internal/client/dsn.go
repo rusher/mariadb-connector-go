@@ -16,10 +16,6 @@ import (
 	"time"
 )
 
-var (
-	errInvalidDSNUnsafeCollation = errors.New("invalid DSN: interpolateParams can not be used with unsafe collations")
-)
-
 // ParseDSN parses a Data Source Name (DSN) string into a Config
 // DSN format: [username[:password]@][protocol[(address)]]/[dbname][?param1=value1&...&paramN=valueN]
 func ParseDSN(dsn string) (*Config, error) {
@@ -244,14 +240,6 @@ func ParseDSN(dsn string) (*Config, error) {
 				}
 				cfg.TimeTruncate = d
 
-			// Fetch size
-			case "fetchSize":
-				size, err := strconv.Atoi(value)
-				if err != nil {
-					return nil, fmt.Errorf("invalid fetchSize: %w", err)
-				}
-				cfg.FetchSize = size
-
 			// Boolean options
 			case "allowAllFiles":
 				cfg.AllowAllFiles = parseBool(value)
@@ -280,9 +268,6 @@ func ParseDSN(dsn string) (*Config, error) {
 			case "compress":
 				cfg.Compress = parseBool(value)
 
-			case "interpolateParams":
-				cfg.InterpolateParams = parseBool(value)
-
 			case "multiStatements":
 				cfg.MultiStatements = parseBool(value)
 
@@ -291,6 +276,16 @@ func ParseDSN(dsn string) (*Config, error) {
 
 			case "rejectReadOnly":
 				cfg.RejectReadOnly = parseBool(value)
+
+			case "resetConnectionOnBorrow":
+				cfg.ResetConnectionOnBorrow = parseBool(value)
+
+			case "minDelayValidation":
+				d, err := time.ParseDuration(value)
+				if err != nil {
+					return nil, fmt.Errorf("invalid minDelayValidation: %w", err)
+				}
+				cfg.MinDelayValidation = d
 
 			case "debug":
 				cfg.Debug = parseBool(value)
@@ -441,11 +436,6 @@ func FormatDSN(cfg *Config) string {
 		addParam("timeTruncate", cfg.TimeTruncate.String())
 	}
 
-	// Fetch size (only add if non-default)
-	if cfg.FetchSize > 0 && cfg.FetchSize != 16 {
-		addParam("fetchSize", strconv.Itoa(cfg.FetchSize))
-	}
-
 	// Boolean options (only add if non-default)
 	if cfg.AllowAllFiles {
 		addParam("allowAllFiles", "true")
@@ -474,9 +464,6 @@ func FormatDSN(cfg *Config) string {
 	if cfg.Compress {
 		addParam("compress", "true")
 	}
-	if cfg.InterpolateParams {
-		addParam("interpolateParams", "true")
-	}
 	if cfg.MultiStatements {
 		addParam("multiStatements", "true")
 	}
@@ -485,6 +472,12 @@ func FormatDSN(cfg *Config) string {
 	}
 	if cfg.RejectReadOnly {
 		addParam("rejectReadOnly", "true")
+	}
+	if cfg.ResetConnectionOnBorrow {
+		addParam("resetConnectionOnBorrow", "true")
+	}
+	if cfg.MinDelayValidation != 250*time.Millisecond {
+		addParam("minDelayValidation", cfg.MinDelayValidation.String())
 	}
 
 	// Custom parameters

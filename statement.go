@@ -13,17 +13,17 @@ import (
 
 // Stmt implements driver.Stmt interface
 type Stmt struct {
-	conn        *Conn
-	query       string
-	stmtID      uint32
-	paramCount  uint16
-	columnCount uint16
-	prepared    bool
+	conn          *Conn
+	query         string
+	stmtID        uint32 // 0xFFFFFFFF = not yet prepared (pipeline sentinel)
+	paramCount    uint16
+	columnCount   uint16
+	cachedColumns []protocol.ColumnDefinition // cached for CACHE_METADATA
 }
 
 // Close closes the statement
 func (s *Stmt) Close() error {
-	if !s.prepared {
+	if s.stmtID == 0xFFFFFFFF {
 		return nil
 	}
 
@@ -38,7 +38,7 @@ func (s *Stmt) Close() error {
 // NumInput returns the number of placeholder parameters.
 // Returns -1 when the statement is not yet prepared (pipelined mode).
 func (s *Stmt) NumInput() int {
-	if s.prepared {
+	if s.stmtID != 0xFFFFFFFF {
 		return int(s.paramCount)
 	}
 	return -1
@@ -54,36 +54,14 @@ func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (drive
 	if s.conn.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
-	stop, err := s.conn.client.WithContext(ctx)
-	if err != nil {
-		return nil, driver.ErrBadConn
-	}
-	defer stop()
-
-	execPkt, err := protocol.NewExecute(s.stmtID, args)
+	comp, err := s.execute(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := s.sendExec(execPkt); err != nil {
-		return nil, err
+	if comp.HasResultSet() {
+		s.cachedColumns = comp.Columns
 	}
-
-	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
-	if err != nil {
-		return nil, err
-	}
-
-	var result *protocol.Completion
-	for _, comp := range completions {
-		if !comp.HasResultSet() {
-			result = comp
-		}
-	}
-	if result == nil {
-		result = &protocol.Completion{}
-	}
-	return result, nil
+	return comp, nil
 }
 
 // Query executes a query that may return rows
@@ -96,47 +74,76 @@ func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driv
 	if s.conn.client.IsClosed() {
 		return nil, driver.ErrBadConn
 	}
+	comp, err := s.execute(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	s.cachedColumns = comp.Columns
+	if !comp.HasResultSet() {
+		return nil, fmt.Errorf("query did not return a result set")
+	}
+	rows := &Rows{
+		conn:    s.conn,
+		current: comp,
+	}
+	if !comp.Loaded {
+		s.conn.client.SetActiveRows(rows)
+	}
+	return rows, nil
+}
+
+// execute builds and sends COM_STMT_EXECUTE (pipelining COM_STMT_PREPARE first
+// when stmtID == 0xFFFFFFFF) and reads the server response.
+// Each command is sent with its own sequence reset to 0; after reading the
+// prepare response StartNextRead resets the sequence to 1 so ReadCompletion
+// correctly reads the execute response.
+func (s *Stmt) execute(ctx context.Context, args []driver.NamedValue) (*protocol.Completion, error) {
 	stop, err := s.conn.client.WithContext(ctx)
 	if err != nil {
 		return nil, driver.ErrBadConn
 	}
 	defer stop()
 
-	execPkt, err := protocol.NewExecute(s.stmtID, args)
+	if s.stmtID == 0xFFFFFFFF {
+		// Pipeline: send prepare (seq=0), then after it's written to socket,
+		// reuse the buffer to build and send execute (seq=0).
+		if err := s.conn.client.Send(protocol.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
+			return nil, err
+		}
+		execPkt, err := protocol.NewExecute(s.conn.client.WriterBuf(), 0xFFFFFFFF, args)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.conn.client.Send(execPkt); err != nil {
+			return nil, err
+		}
+		// Read the prepare response first.
+		stmtID, paramCount, columnCount, columns, err := s.conn.client.ReadPrepareResponse()
+		if err != nil {
+			return nil, err
+		}
+		s.stmtID = stmtID
+		s.paramCount = paramCount
+		s.columnCount = columnCount
+		s.cachedColumns = columns
+		// Reset sequence to 1 so the reader expects the execute response's first packet.
+		s.conn.client.StartNextRead()
+	} else {
+		execPkt, err := protocol.NewExecute(s.conn.client.WriterBuf(), s.stmtID, args)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.conn.client.Send(execPkt); err != nil {
+			return nil, err
+		}
+	}
+
+	comp, err := s.conn.client.ReadCompletion(true, s.cachedColumns)
 	if err != nil {
 		return nil, err
 	}
-
-	if err := s.sendExec(execPkt); err != nil {
-		return nil, err
-	}
-
-	completions, err := s.conn.client.ReadCompletions(true, s.conn.client.FetchSize())
-	if err != nil {
-		return nil, err
-	}
-
-	if !hasResultSet(completions) {
-		return nil, fmt.Errorf("query did not return a result set")
-	}
-
-	rows := &Rows{
-		conn:        s.conn,
-		completions: completions,
-	}
-	if !completions[0].Loaded {
-		s.conn.client.SetActiveRows(rows)
-	}
-	return rows, nil
-}
-
-// sendExec dispatches an already-built execute packet:
-// pipelines prepare+execute when not yet prepared, or sends directly otherwise.
-func (s *Stmt) sendExec(execPkt []byte) error {
-	if s.prepared {
-		return s.conn.client.Send(execPkt)
-	}
-	return s.prepareAndExecute(execPkt)
+	s.cachedColumns = comp.Columns
+	return comp, nil
 }
 
 // prepareInternal sends COM_STMT_PREPARE and reads the server response.
@@ -144,47 +151,15 @@ func (s *Stmt) prepareInternal() error {
 	if err := s.conn.client.Send(protocol.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
 		return err
 	}
-	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
+	stmtID, paramCount, columnCount, columns, err := s.conn.client.ReadPrepareResponse()
 	if err != nil {
 		return err
 	}
 	s.stmtID = stmtID
 	s.paramCount = paramCount
 	s.columnCount = columnCount
-	s.prepared = true
+	s.cachedColumns = columns
 	return nil
-}
-
-// prepareAndExecute pipelines COM_STMT_PREPARE + COM_STMT_EXECUTE using
-// stmtID=0xFFFFFFFF as the sentinel value (MariaDB STMT_BULK_OPERATIONS).
-// Only called when CanPipelinePrepare() is true.
-func (s *Stmt) prepareAndExecute(execPkt []byte) error {
-	protocol.SetStmtID(execPkt, 0xFFFFFFFF)
-	if err := s.conn.client.Send(protocol.NewPrepare(s.conn.client.WriterBuf(), s.query)); err != nil {
-		return err
-	}
-	if err := s.conn.client.SendNext(execPkt); err != nil {
-		return err
-	}
-	stmtID, paramCount, columnCount, err := s.conn.client.ReadPrepareResponse()
-	if err != nil {
-		return err
-	}
-	s.stmtID = stmtID
-	s.paramCount = paramCount
-	s.columnCount = columnCount
-	s.prepared = true
-	return nil
-}
-
-// hasResultSet reports whether any completion in the slice carries a result set.
-func hasResultSet(completions []*protocol.Completion) bool {
-	for _, c := range completions {
-		if c.HasResultSet() {
-			return true
-		}
-	}
-	return false
 }
 
 // valuesToNamedValues converts []driver.Value to []driver.NamedValue

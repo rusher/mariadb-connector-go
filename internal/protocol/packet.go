@@ -19,7 +19,6 @@ const hdrSize = HdrSize
 type PacketReader struct {
 	reader   io.Reader
 	sequence *uint8  // Shared sequence pointer
-	logger   Logger  // Debug logger
 	hdr      [4]byte // reused per-call to avoid per-read heap allocation
 	scratch  []byte  // reusable buffer for transient reads (do not retain across calls)
 }
@@ -29,7 +28,6 @@ func NewPacketReader(r io.Reader, seq *uint8) *PacketReader {
 	return &PacketReader{
 		reader:   r,
 		sequence: seq,
-		logger:   GetLogger(),
 	}
 }
 
@@ -46,7 +44,6 @@ func (pr *PacketReader) ReadScratch() ([]byte, error) {
 	if sequence != *pr.sequence {
 		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", *pr.sequence, sequence)
 	}
-	receivedSeq := *pr.sequence
 	*pr.sequence++
 
 	if cap(pr.scratch) >= length {
@@ -58,71 +55,70 @@ func (pr *PacketReader) ReadScratch() ([]byte, error) {
 		return nil, fmt.Errorf("failed to read packet data: %w", err)
 	}
 
-	// Multi-packet: fall back to a fresh allocation since we must concatenate.
+	// Multi-packet: must allocate and concatenate all continuation packets
 	if length == MaxPacketSize {
-		more, err := pr.ReadPacket()
-		if err != nil {
-			return nil, err
-		}
-		data := make([]byte, length+len(more))
+		data := make([]byte, length, length*2)
 		copy(data, pr.scratch)
-		copy(data[length:], more)
-		return data, nil
-	}
 
-	if pr.logger.IsEnabled() {
-		pr.logger.LogReceive(pr.scratch, receivedSeq)
-	}
-	return pr.scratch, nil
-}
-
-// ReadPacket reads a single packet from the connection
-func (pr *PacketReader) ReadPacket() ([]byte, error) {
-	if _, err := io.ReadFull(pr.reader, pr.hdr[:]); err != nil {
-		return nil, fmt.Errorf("failed to read packet header: %w", err)
-	}
-
-	// Parse packet length (first 3 bytes, little-endian)
-	length := int(pr.hdr[0]) | int(pr.hdr[1])<<8 | int(pr.hdr[2])<<16
-
-	// Verify sequence number
-	sequence := pr.hdr[3]
-	if sequence != *pr.sequence {
-		return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", *pr.sequence, sequence)
-	}
-
-	receivedSeq := *pr.sequence
-	*pr.sequence++
-
-	// Read packet data
-	data := make([]byte, length)
-	if _, err := io.ReadFull(pr.reader, data); err != nil {
-		return nil, fmt.Errorf("failed to read packet data: %w", err)
-	}
-
-	// Handle multi-packet (packets of exactly MaxPacketSize)
-	if length == MaxPacketSize {
-		// Read continuation packets
 		for {
-			nextData, err := pr.ReadPacket()
-			if err != nil {
-				return nil, err
+			// Read next packet header
+			if _, err := io.ReadFull(pr.reader, pr.hdr[:]); err != nil {
+				return nil, fmt.Errorf("failed to read packet header: %w", err)
 			}
+
+			nextLen := int(pr.hdr[0]) | int(pr.hdr[1])<<8 | int(pr.hdr[2])<<16
+			sequence := pr.hdr[3]
+			if sequence != *pr.sequence {
+				return nil, fmt.Errorf("sequence mismatch: expected %d, got %d", *pr.sequence, sequence)
+			}
+			*pr.sequence++
+
+			// Read packet data
+			nextData := make([]byte, nextLen)
+			if _, err := io.ReadFull(pr.reader, nextData); err != nil {
+				return nil, fmt.Errorf("failed to read packet data: %w", err)
+			}
+
 			data = append(data, nextData...)
 
 			// Stop if this packet is smaller than max size
-			if len(nextData) < MaxPacketSize {
+			if nextLen < MaxPacketSize {
 				break
 			}
 		}
+		return data, nil
 	}
 
-	// Log received packet
-	if pr.logger.IsEnabled() {
-		pr.logger.LogReceive(data, receivedSeq)
-	}
+	return pr.scratch, nil
+}
 
-	return data, nil
+// peeker is satisfied by *bufio.Reader.
+type peeker interface {
+	Peek(n int) ([]byte, error)
+}
+
+// PeekIsTerminator reports whether the next packet on the wire is a result-set
+// terminator (0xff ERR or 0xfe EOF/OK-as-EOF with length < 0xffffff) without
+// consuming any bytes. Returns false if the underlying reader does not support
+// Peek or fewer than 5 bytes are buffered.
+func (pr *PacketReader) PeekIsTerminator() bool {
+	p, ok := pr.reader.(peeker)
+	if !ok {
+		return false
+	}
+	hdr, err := p.Peek(5)
+	if err != nil || len(hdr) < 5 {
+		return false
+	}
+	if hdr[3] != *pr.sequence {
+		return false
+	}
+	length := int(hdr[0]) | int(hdr[1])<<8 | int(hdr[2])<<16
+	if length < 1 {
+		return false
+	}
+	first := hdr[4]
+	return first == 0xff || (first == 0xfe && length < 0xffffff)
 }
 
 // ResetSequence resets the sequence number
@@ -134,7 +130,6 @@ func (pr *PacketReader) ResetSequence() {
 type PacketWriter struct {
 	writer   io.Writer
 	sequence *uint8  // Shared sequence pointer
-	logger   Logger  // Debug logger
 	hdr      [4]byte // reused per-call to avoid per-write heap allocation
 	scratch  []byte  // reusable send buffer — do not retain across Write calls
 }
@@ -144,8 +139,7 @@ func NewPacketWriter(w io.Writer, seq *uint8) *PacketWriter {
 	return &PacketWriter{
 		writer:   w,
 		sequence: seq,
-		logger:   GetLogger(),
-		scratch:  make([]byte, 16*1024),
+		scratch:  make([]byte, 64*1024),
 	}
 }
 
@@ -161,11 +155,6 @@ func (pw *PacketWriter) Buf() []byte {
 // an empty packet must be sent to indicate that transmission is complete
 func (pw *PacketWriter) WritePacket(data []byte) error {
 	dataLen := len(data)
-
-	// Log sent packet (before splitting)
-	if pw.logger.IsEnabled() {
-		pw.logger.LogSend(data, *pw.sequence)
-	}
 
 	// Handle empty packet case - must still send a packet with 0 length
 	if dataLen == 0 {
@@ -220,10 +209,6 @@ func (pw *PacketWriter) WritePacket(data []byte) error {
 func (pw *PacketWriter) Write(buf []byte) error {
 	payload := buf[hdrSize:]
 	payloadLen := len(payload)
-
-	if pw.logger.IsEnabled() {
-		pw.logger.LogSend(payload, *pw.sequence)
-	}
 
 	if payloadLen <= MaxPacketSize {
 		buf[0] = byte(payloadLen)

@@ -51,22 +51,20 @@ type Config struct {
 	Params               map[string]string // Additional connection parameters
 
 	// Boolean options
-	AllowAllFiles            bool // Allow all files to be used with LOAD DATA LOCAL INFILE
-	AllowCleartextPasswords  bool // Allows the cleartext client side plugin
-	AllowFallbackToPlaintext bool // Allows fallback to unencrypted connection if server does not support TLS
-	AllowNativePasswords     bool // Allows the native password authentication method (default: true)
-	AllowOldPasswords        bool // Allows the old insecure password method
-	AllowPublicKeyRetrieval  bool // Allow retrieval of server public key for caching_sha2_password (default: true)
-	CheckConnLiveness        bool // Check connections for liveness before using them (default: true)
-	ClientFoundRows          bool // Return number of matching rows instead of rows changed
-	ColumnsWithAlias         bool // Prepend table alias to column names
-	InterpolateParams        bool // Interpolate placeholders into query string
-	MultiStatements          bool // Allow multiple statements in one query
-	ParseTime                bool // Parse time values to time.Time
-	RejectReadOnly           bool // Reject read-only connections
-
-	// Result set options
-	FetchSize int // Number of rows to pre-fetch for streaming results (default: 16)
+	AllowAllFiles            bool          // Allow all files to be used with LOAD DATA LOCAL INFILE
+	AllowCleartextPasswords  bool          // Allows the cleartext client side plugin
+	AllowFallbackToPlaintext bool          // Allows fallback to unencrypted connection if server does not support TLS
+	AllowNativePasswords     bool          // Allows the native password authentication method (default: true)
+	AllowOldPasswords        bool          // Allows the old insecure password method
+	AllowPublicKeyRetrieval  bool          // Allow retrieval of server public key for caching_sha2_password (default: true)
+	CheckConnLiveness        bool          // Check connections for liveness before using them (default: true)
+	ClientFoundRows          bool          // Return number of matching rows instead of rows changed
+	ColumnsWithAlias         bool          // Prepend table alias to column names
+	MultiStatements          bool          // Allow multiple statements in one query
+	ParseTime                bool          // Parse time values to time.Time
+	RejectReadOnly           bool          // Reject read-only connections
+	ResetConnectionOnBorrow  bool          // Send COM_RESET_CONNECTION (or COM_PING) when borrowing from pool (default: false)
+	MinDelayValidation       time.Duration // Skip validation if last exchange was more recent than this (default: 250ms; 0 = always validate)
 
 	// Debug options
 	Debug bool // Enable debug logging of all protocol exchanges
@@ -184,7 +182,7 @@ func NewConfig() *Config {
 		AllowNativePasswords:    true,
 		AllowPublicKeyRetrieval: true,
 		CheckConnLiveness:       true,
-		FetchSize:               16,
+		MinDelayValidation:      250 * time.Millisecond,
 		Params:                  make(map[string]string),
 	}
 }
@@ -223,11 +221,11 @@ func (c *Config) Clone() *Config {
 		CheckConnLiveness:        c.CheckConnLiveness,
 		ClientFoundRows:          c.ClientFoundRows,
 		ColumnsWithAlias:         c.ColumnsWithAlias,
-		InterpolateParams:        c.InterpolateParams,
 		MultiStatements:          c.MultiStatements,
 		ParseTime:                c.ParseTime,
 		RejectReadOnly:           c.RejectReadOnly,
-		FetchSize:                c.FetchSize,
+		ResetConnectionOnBorrow:  c.ResetConnectionOnBorrow,
+		MinDelayValidation:       c.MinDelayValidation,
 		Debug:                    c.Debug,
 		Compress:                 c.Compress,
 		TimeTruncate:             c.TimeTruncate,
@@ -256,6 +254,12 @@ func (c *Config) Clone() *Config {
 
 	return clone
 }
+
+// GetCharset returns the charset name for SET NAMES
+func (c *Config) GetCharset() string { return c.Charset }
+
+// GetCollation returns the optional collation for SET NAMES … COLLATE
+func (c *Config) GetCollation() string { return c.Collation }
 
 // ── auth.PluginConfig implementation ─────────────────────────────────────────
 

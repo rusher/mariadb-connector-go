@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // Copyright (c) 2026 MariaDB Corporation Ab
 
-package protocol
+package handshake
 
 import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
+
+	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
 
 // HandshakePacket represents the initial handshake from server
@@ -29,77 +31,89 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 	packet := &HandshakePacket{}
 	pos := 0
 
-	// Protocol version
 	packet.ProtocolVersion = data[pos]
 	pos++
 
-	// Server version (null-terminated)
-	serverVersion, newPos, err := ReadNullTerminatedString(data, pos)
+	serverVersion, newPos, err := protocol.ReadNullTerminatedString(data, pos)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read server version: %w", err)
 	}
 	packet.ServerVersion = serverVersion
 	pos = newPos
 
-	// Connection ID (4 bytes)
 	_ = data[pos+3]
 	packet.ConnectionID = binary.LittleEndian.Uint32(data[pos:])
 	pos += 4
 
-	// Auth plugin data part 1 (8 bytes)
 	_ = data[pos+7]
 	packet.Salt = make([]byte, 8)
 	copy(packet.Salt, data[pos:pos+8])
 	pos += 8
 
-	// Filler (1 byte)
-	pos++
+	pos++ // filler
 
-	// Capability flags (lower 2 bytes)
 	_ = data[pos+1]
 	packet.ServerCapabilities = uint64(binary.LittleEndian.Uint16(data[pos:]))
 	pos += 2
 
-	// Check if we have more data (protocol 4.1+)
 	if pos < len(data) {
-		// Character set
 		packet.Charset = data[pos]
 		pos++
 
-		// Server status
 		if pos+2 <= len(data) {
 			packet.ServerStatus = binary.LittleEndian.Uint16(data[pos:])
 			pos += 2
 
-			// Extended capability flags (upper 2 bytes)
 			if pos+2 <= len(data) {
-				packet.ServerCapabilities |= uint64(binary.LittleEndian.Uint16(data[pos:])) << 16
+				serverCapabilities4Bytes := uint32(packet.ServerCapabilities) | (uint32(binary.LittleEndian.Uint16(data[pos:])) << 16)
 				pos += 2
 
-				// Auth plugin data length
-				var authPluginDataLen byte
+				var saltLength int
 				if pos < len(data) {
-					authPluginDataLen = data[pos]
+					if serverCapabilities4Bytes&protocol.PLUGIN_AUTH != 0 {
+						authPluginDataLen := int(data[pos])
+						saltLength = authPluginDataLen - 9
+						if saltLength < 12 {
+							saltLength = 12
+						}
+					}
 					pos++
 
-					// Reserved (10 bytes)
-					if pos+10 <= len(data) {
-						pos += 10
+					if pos+6 <= len(data) {
+						pos += 6 // reserved
 
-						// Auth plugin data part 2
-						if authPluginDataLen > 8 {
-							remaining := int(authPluginDataLen) - 8
-							if pos+remaining <= len(data) {
-								salt2 := make([]byte, remaining)
-								copy(salt2, data[pos:pos+remaining])
-								packet.Salt = append(packet.Salt, salt2...)
-								pos += remaining
-							}
+						var mariaDBAdditionalCaps uint32
+						if pos+4 <= len(data) {
+							mariaDBAdditionalCaps = binary.LittleEndian.Uint32(data[pos:])
+							pos += 4
 						}
 
-						// Auth plugin name (null-terminated)
+						if serverCapabilities4Bytes&protocol.SECURE_CONNECTION != 0 {
+							if saltLength > 0 && pos+saltLength <= len(data) {
+								salt2 := make([]byte, saltLength)
+								copy(salt2, data[pos:pos+saltLength])
+								packet.Salt = append(packet.Salt, salt2...)
+								pos += saltLength
+							} else if saltLength == 0 && pos < len(data) {
+								salt2, newPos, err := protocol.ReadNullTerminatedString(data, pos)
+								if err == nil {
+									packet.Salt = append(packet.Salt, []byte(salt2)...)
+									pos = newPos
+								}
+							}
+						}
 						if pos < len(data) {
-							authPluginName, _, err := ReadNullTerminatedString(data, pos)
+							pos++ // skip 1 byte after salt
+						}
+
+						if serverCapabilities4Bytes&protocol.CLIENT_MYSQL == 0 {
+							packet.ServerCapabilities = uint64(serverCapabilities4Bytes) | (uint64(mariaDBAdditionalCaps) << 32)
+						} else {
+							packet.ServerCapabilities = uint64(serverCapabilities4Bytes)
+						}
+
+						if pos < len(data) && serverCapabilities4Bytes&protocol.PLUGIN_AUTH != 0 {
+							authPluginName, _, err := protocol.ReadNullTerminatedString(data, pos)
 							if err == nil {
 								packet.AuthPluginName = authPluginName
 							}
@@ -110,7 +124,6 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 		}
 	}
 
-	// Default auth plugin if not specified
 	if packet.AuthPluginName == "" {
 		packet.AuthPluginName = "mysql_native_password"
 	}
@@ -118,7 +131,7 @@ func ParseHandshakePacket(data []byte) (*HandshakePacket, error) {
 	return packet, nil
 }
 
-// HandshakeConfig interface for handshake - we need to extract these fields
+// HandshakeConfig interface for handshake
 type HandshakeConfig interface {
 	GetUser() string
 	GetPassword() string
@@ -126,32 +139,24 @@ type HandshakeConfig interface {
 }
 
 // BuildHandshakeResponse builds the handshake response packet
-// Based on MariaDB Java connector HandshakeResponse.java
 func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, clientCaps uint64) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Client capabilities (4 bytes) - lower 32 bits
 	capBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(capBytes, uint32(clientCaps))
 	buf.Write(capBytes)
 
-	// Max packet size (4 bytes) - 1GB
 	maxPacketBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(maxPacketBytes, 1024*1024*1024)
 	buf.Write(maxPacketBytes)
 
-	// Character set (1 byte) - utf8mb4
-	buf.WriteByte(CHARSET_UTF8MB4)
+	buf.WriteByte(protocol.CHARSET_UTF8MB4)
+	buf.Write(make([]byte, 19)) // reserved
 
-	// Reserved (19 bytes)
-	buf.Write(make([]byte, 19))
-
-	// Extended client capabilities (4 bytes) - upper 32 bits (MariaDB extended)
 	extCapBytes := make([]byte, 4)
 	binary.LittleEndian.PutUint32(extCapBytes, uint32(clientCaps>>32))
 	buf.Write(extCapBytes)
 
-	// Username (null-terminated)
 	username := config.GetUser()
 	if username == "" {
 		username = "root"
@@ -159,21 +164,18 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 	buf.WriteString(username)
 	buf.WriteByte(0)
 
-	// Generate auth response based on plugin
 	password := config.GetPassword()
 	var authResponse []byte
-
 	if handshake.AuthPluginName == "mysql_clear_password" {
 		authResponse = []byte(password)
 	} else {
 		authResponse = generateAuthResponse(password, handshake.Salt)
 	}
 
-	// Write auth response with length
-	if handshake.ServerCapabilities&CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
-		buf.Write(WriteLengthEncodedInteger(nil, uint64(len(authResponse))))
+	if handshake.ServerCapabilities&protocol.CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA != 0 {
+		buf.Write(protocol.WriteLengthEncodedInteger(nil, uint64(len(authResponse))))
 		buf.Write(authResponse)
-	} else if handshake.ServerCapabilities&CLIENT_SECURE_CONNECTION != 0 {
+	} else if handshake.ServerCapabilities&protocol.CLIENT_SECURE_CONNECTION != 0 {
 		buf.WriteByte(byte(len(authResponse)))
 		buf.Write(authResponse)
 	} else {
@@ -181,14 +183,12 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 		buf.WriteByte(0)
 	}
 
-	// Database name (null-terminated) if CLIENT_CONNECT_WITH_DB
-	if clientCaps&CLIENT_CONNECT_WITH_DB != 0 {
+	if clientCaps&protocol.CLIENT_CONNECT_WITH_DB != 0 {
 		buf.WriteString(config.GetDatabase())
 		buf.WriteByte(0)
 	}
 
-	// Auth plugin name (null-terminated) if CLIENT_PLUGIN_AUTH
-	if handshake.ServerCapabilities&PLUGIN_AUTH != 0 {
+	if handshake.ServerCapabilities&protocol.PLUGIN_AUTH != 0 {
 		pluginName := handshake.AuthPluginName
 		if pluginName == "" {
 			pluginName = "mysql_native_password"
@@ -197,23 +197,17 @@ func BuildHandshakeResponse(config HandshakeConfig, handshake *HandshakePacket, 
 		buf.WriteByte(0)
 	}
 
-	// Connection attributes if CLIENT_CONNECT_ATTRS
-	if clientCaps&CONNECT_ATTRS != 0 && handshake.ServerCapabilities&CONNECT_ATTRS != 0 {
+	if clientCaps&protocol.CONNECT_ATTRS != 0 && handshake.ServerCapabilities&protocol.CONNECT_ATTRS != 0 {
 		var attrBuf bytes.Buffer
-
-		attrBuf.Write(WriteLengthEncodedString(nil, "_client_name"))
-		attrBuf.Write(WriteLengthEncodedString(nil, "mariadb-connector-go"))
-
-		attrBuf.Write(WriteLengthEncodedString(nil, "_client_version"))
-		attrBuf.Write(WriteLengthEncodedString(nil, "1.0.0"))
-
-		attrBuf.Write(WriteLengthEncodedString(nil, "_os"))
-		attrBuf.Write(WriteLengthEncodedString(nil, "Linux"))
-
-		attrBuf.Write(WriteLengthEncodedString(nil, "_platform"))
-		attrBuf.Write(WriteLengthEncodedString(nil, "x86_64"))
-
-		buf.Write(WriteLengthEncodedInteger(nil, uint64(attrBuf.Len())))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_client_name"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "mariadb-connector-go"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_client_version"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "1.0.0"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_os"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "Linux"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "_platform"))
+		attrBuf.Write(protocol.WriteLengthEncodedString(nil, "x86_64"))
+		buf.Write(protocol.WriteLengthEncodedInteger(nil, uint64(attrBuf.Len())))
 		buf.Write(attrBuf.Bytes())
 	}
 
@@ -246,24 +240,5 @@ func generateAuthResponse(password string, salt []byte) []byte {
 	for i := 0; i < 20; i++ {
 		response[i] = hash1[i] ^ hash3[i]
 	}
-
 	return response
-}
-
-// ParseAuthResult parses the authentication result packet
-func ParseAuthResult(data []byte) error {
-	if len(data) == 0 {
-		return fmt.Errorf("empty auth result")
-	}
-
-	switch data[0] {
-	case 0x00:
-		return nil
-	case 0xfe:
-		return fmt.Errorf("auth switch not yet implemented")
-	case 0xff:
-		return ParseErrorPacket(data)
-	default:
-		return fmt.Errorf("unexpected auth result packet type: 0x%x", data[0])
-	}
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/mariadb-connector-go/mariadb/internal/client/handshake"
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
 
@@ -27,6 +28,8 @@ type Client struct {
 
 	// Active result set tracking
 	activeRows interface{} // Currently active streaming result set (type will be *Rows from parent package)
+
+	completion protocol.Completion // current result — reused per query, no allocation
 
 	closed bool
 }
@@ -101,119 +104,26 @@ func (c *Client) Connect(ctx context.Context) error {
 		// Will be set per-operation
 	}
 
-	// Enable debug logging if configured (MUST be set before creating reader/writer)
-	if c.config.Debug {
-		protocol.SetLogger(protocol.NewDebugLogger(true))
-	}
-
 	// Initialize packet reader/writer with shared sequence.
-	// The reader is wrapped in a 64 KB bufio.Reader to batch kernel reads:
-	// without buffering, every ReadPacket call makes two syscalls (header + data).
+	// The reader is wrapped in a 256 KB bufio.Reader to batch kernel reads:
 	c.sequence = 0
-	c.reader = protocol.NewPacketReader(bufio.NewReaderSize(c.netConn, 65536), &c.sequence)
+	c.reader = protocol.NewPacketReader(bufio.NewReaderSize(c.netConn, 256*1024), &c.sequence)
 	c.writer = protocol.NewPacketWriter(c.netConn, &c.sequence)
 
 	// Perform handshake
-	if err := c.handshake(ctx); err != nil {
-		c.netConn.Close()
-		return fmt.Errorf("handshake failed: %w", err)
-	}
-
-	return nil
-}
-
-// handshake performs the MySQL/MariaDB handshake
-func (c *Client) handshake(ctx context.Context) error {
-	// Read initial handshake packet from server (sequence 0)
-	data, err := c.reader.ReadPacket()
-	if err != nil {
-		return fmt.Errorf("failed to read handshake packet: %w", err)
-	}
-
-	// Parse handshake packet
-	handshake, err := protocol.ParseHandshakePacket(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse handshake packet: %w", err)
-	}
-
-	// Initialize client capabilities based on configuration and server capabilities
-	clientCaps := protocol.InitializeClientCapabilities(c.config, handshake.ServerCapabilities, c.config.DBName)
-
-	// Create connection context
-	c.context = NewContext(c.config, handshake, clientCaps)
-
-	// Build handshake response
-	response, err := protocol.BuildHandshakeResponse(
+	err = handshake.Perform(
+		c.reader,
+		c.writer,
+		&c.sequence,
 		c.config,
-		handshake,
-		clientCaps,
+		func(hs *handshake.HandshakePacket, clientCaps uint64) protocol.ContextUpdater {
+			c.context = NewContext(c.config, hs.ServerCapabilities, hs.ServerVersion, hs.ConnectionID, hs.ServerStatus, clientCaps)
+			return c.context
+		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to build handshake response: %w", err)
-	}
-
-	// Send handshake response (sequence 1)
-	if err := c.writer.WritePacket(response); err != nil {
-		return fmt.Errorf("failed to send handshake response: %w", err)
-	}
-
-	// Read authentication result (sequence 2)
-	authResult, err := c.reader.ReadPacket()
-	if err != nil {
-		return fmt.Errorf("failed to read auth result: %w", err)
-	}
-
-	// Handle authentication result with plugin support
-	if err := c.handleAuthResult(authResult, handshake.Salt, handshake.AuthPluginName, 10); err != nil {
-		return fmt.Errorf("authentication failed: %w", err)
-	}
-
-	// Reset sequence for next command
-	c.sequence = 0
-
-	// Validate and set charset
-	if err := c.config.ValidateCharset(); err != nil {
-		return fmt.Errorf("invalid charset: %w", err)
-	}
-
-	// Execute SET NAMES to ensure UTF-8 encoding
-	if err := c.setCharset(); err != nil {
-		return fmt.Errorf("failed to set charset: %w", err)
-	}
-
-	return nil
-}
-
-// setCharset executes SET NAMES to configure the connection charset
-func (c *Client) setCharset() error {
-	// Build SET NAMES query
-	var query string
-	if c.config.Collation != "" {
-		query = fmt.Sprintf("SET NAMES %s COLLATE %s", c.config.Charset, c.config.Collation)
-	} else {
-		query = fmt.Sprintf("SET NAMES %s", c.config.Charset)
-	}
-
-	// Send command (resets sequence)
-	c.sequence = 0
-	if err := c.writer.Write(protocol.NewQuery(c.writer.Buf(), query)); err != nil {
-		return fmt.Errorf("failed to send SET NAMES query: %w", err)
-	}
-
-	// Read response
-	data, err := c.reader.ReadPacket()
-	if err != nil {
-		return fmt.Errorf("failed to read SET NAMES response: %w", err)
-	}
-
-	// Check for error packet
-	if len(data) > 0 && data[0] == 0xff {
-		return protocol.ParseErrorPacket(data)
-	}
-
-	// Should be OK packet - parse it to update context
-	if len(data) > 0 && data[0] == 0x00 {
-		_, _ = protocol.ParseOkPacket(data, c.context)
+		c.netConn.Close()
+		return fmt.Errorf("handshake failed: %w", err)
 	}
 
 	return nil
@@ -227,11 +137,12 @@ func (c *Client) Send(buf []byte) error {
 	return c.writer.Write(buf)
 }
 
-// SendNext sends a continuation packet without resetting the sequence number.
-// Use after Send to pipeline multiple packets before reading any response.
-// Must be called with client mutex locked.
-func (c *Client) SendNext(buf []byte) error {
-	return c.writer.Write(buf)
+// StartNextRead resets the sequence to 1, ready to read the first response
+// packet of the next pipelined command (server always starts responses at seq=1).
+// Call this between ReadPrepareResponse and ReadCompletion when pipelining
+// COM_STMT_PREPARE + COM_STMT_EXECUTE.
+func (c *Client) StartNextRead() {
+	c.sequence = 1
 }
 
 // WriterBuf returns the writer's scratch buffer for use by packet constructors.
@@ -241,54 +152,64 @@ func (c *Client) WriterBuf() []byte {
 }
 
 // ReadPrepareResponse reads and parses a COM_STMT_PREPARE response.
-// It returns the statement ID and consumes the param/column definition packets.
+// It returns the statement ID, counts, and parsed column definitions.
 // Must be called with client mutex locked.
-func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, columnCount uint16, err error) {
-	response, err := c.reader.ReadPacket()
+func (c *Client) ReadPrepareResponse() (stmtID uint32, paramCount uint16, columnCount uint16, columns []protocol.ColumnDefinition, err error) {
+	response, err := c.reader.ReadScratch()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, nil, err
 	}
 
 	if len(response) > 0 && response[0] == 0xff {
-		return 0, 0, 0, protocol.ParseErrorPacket(response)
+		return 0, 0, 0, nil, protocol.ParseErrorPacket(response)
 	}
 
 	if len(response) < 12 || response[0] != 0x00 {
-		return 0, 0, 0, fmt.Errorf("unexpected COM_STMT_PREPARE response (first byte: 0x%02x)", response[0])
+		return 0, 0, 0, nil, fmt.Errorf("unexpected COM_STMT_PREPARE response (first byte: 0x%02x)", response[0])
 	}
 
 	stmtID = binary.LittleEndian.Uint32(response[1:])
 	columnCount = binary.LittleEndian.Uint16(response[5:])
 	paramCount = binary.LittleEndian.Uint16(response[7:])
 
+	// Consume param definitions (not used; we rely on the caller's arg list).
 	for i := 0; i < int(paramCount); i++ {
-		if _, err = c.reader.ReadPacket(); err != nil {
-			return 0, 0, 0, err
+		if _, err = c.reader.ReadScratch(); err != nil {
+			return 0, 0, 0, nil, err
 		}
 	}
 	if paramCount > 0 && !c.context.IsEOFDeprecated() {
-		if _, err = c.reader.ReadPacket(); err != nil {
-			return 0, 0, 0, err
+		if _, err = c.reader.ReadScratch(); err != nil {
+			return 0, 0, 0, nil, err
 		}
 	}
 
-	for i := 0; i < int(columnCount); i++ {
-		if _, err = c.reader.ReadPacket(); err != nil {
-			return 0, 0, 0, err
+	// Parse column definitions — seed the CACHE_METADATA column cache.
+	if columnCount > 0 {
+		columns = make([]protocol.ColumnDefinition, columnCount)
+		for i := range columns {
+			colData, rerr := c.reader.ReadScratch()
+			if rerr != nil {
+				return 0, 0, 0, nil, rerr
+			}
+			if rerr = protocol.FillColumnDefinition(colData, &columns[i], c.context.IsExtendedMetadata()); rerr != nil {
+				return 0, 0, 0, nil, rerr
+			}
 		}
-	}
-	if columnCount > 0 && !c.context.IsEOFDeprecated() {
-		if _, err = c.reader.ReadPacket(); err != nil {
-			return 0, 0, 0, err
+		if !c.context.IsEOFDeprecated() {
+			if _, err = c.reader.ReadScratch(); err != nil {
+				return 0, 0, 0, nil, err
+			}
 		}
 	}
 
-	return stmtID, paramCount, columnCount, nil
+	return stmtID, paramCount, columnCount, columns, nil
 }
 
-// ReadPacket reads a packet from the server.
-func (c *Client) ReadPacket() ([]byte, error) {
-	return c.reader.ReadPacket()
+// ReadScratch reads a packet using the reader's scratch buffer.
+// The returned slice is only valid until the next read call.
+func (c *Client) ReadScratch() ([]byte, error) {
+	return c.reader.ReadScratch()
 }
 
 // WritePacket writes a raw (no header reservation) packet to the server.
@@ -327,6 +248,11 @@ func (c *Client) Context() *Context {
 	return c.context
 }
 
+// Config returns the client configuration.
+func (c *Client) Config() *Config {
+	return c.config
+}
+
 // Reader returns the packet reader
 func (c *Client) Reader() *protocol.PacketReader {
 	return c.reader
@@ -354,7 +280,7 @@ func (c *Client) ExecInternal(ctx context.Context, query string) error {
 		return err
 	}
 
-	response, err := c.reader.ReadPacket()
+	response, err := c.reader.ReadScratch()
 	if err != nil {
 		return err
 	}

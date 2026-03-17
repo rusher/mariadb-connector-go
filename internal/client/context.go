@@ -4,6 +4,8 @@
 package client
 
 import (
+	"time"
+
 	"github.com/mariadb-connector-go/mariadb/internal/protocol"
 )
 
@@ -27,21 +29,23 @@ type Context struct {
 	skipMeta         bool
 	extendedMetadata bool
 
+	// Timestamp of last completed server exchange (OK/EOF received)
+	lastExchange time.Time
+
 	// Configuration
 	config *Config
 }
 
-// NewContext creates a new connection context from handshake
-func NewContext(config *Config, handshake *protocol.HandshakePacket, clientCaps uint64) *Context {
-	// Negotiated capabilities = client AND server
-	negotiatedCaps := clientCaps & handshake.ServerCapabilities
+// NewContext creates a new connection context from handshake fields
+func NewContext(config *Config, serverCaps uint64, serverVersion string, threadID uint32, serverStatus uint16, clientCaps uint64) *Context {
+	negotiatedCaps := clientCaps & serverCaps
 
 	ctx := &Context{
-		serverCapabilities: handshake.ServerCapabilities,
+		serverCapabilities: serverCaps,
 		clientCapabilities: negotiatedCaps,
-		serverVersion:      handshake.ServerVersion,
-		threadID:           handshake.ConnectionID,
-		serverStatus:       handshake.ServerStatus,
+		serverVersion:      serverVersion,
+		threadID:           threadID,
+		serverStatus:       serverStatus,
 		config:             config,
 	}
 
@@ -88,9 +92,15 @@ func (c *Context) GetServerStatus() uint16 {
 	return c.serverStatus
 }
 
-// SetServerStatus sets the server status flags
+// SetServerStatus sets the server status flags and stamps the last-exchange time.
 func (c *Context) SetServerStatus(status uint16) {
 	c.serverStatus = status
+	c.lastExchange = time.Now()
+}
+
+// LastExchange returns the time of the last completed server exchange.
+func (c *Context) LastExchange() time.Time {
+	return c.lastExchange
 }
 
 // GetServerVersion returns the server version string
@@ -102,6 +112,11 @@ func (c *Context) GetServerVersion() string {
 // COM_STMT_PREPARE + COM_STMT_EXECUTE (MariaDB STMT_BULK_OPERATIONS capability).
 func (c *Context) CanPipelinePrepare() bool {
 	return c.HasClientCapability(protocol.STMT_BULK_OPERATIONS)
+}
+
+// NoBackslashEscapes reports whether the server's NO_BACKSLASH_ESCAPES SQL mode is active.
+func (c *Context) NoBackslashEscapes() bool {
+	return c.serverStatus&protocol.SERVER_STATUS_NO_BACKSLASH_ESCAPES != 0
 }
 
 // IsEOFDeprecated returns whether EOF packets are deprecated

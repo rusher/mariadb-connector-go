@@ -4,11 +4,65 @@
 package protocol
 
 import (
-	"fmt"
+	"database/sql/driver"
 	"strconv"
 	"time"
 	"unsafe"
 )
+
+// ParseTextRowDirect parses a text-protocol row directly into dest, avoiding the
+// intermediate []interface{} allocation that ParseTextRow requires.
+func ParseTextRowDirect(data []byte, columns []ColumnDefinition, dest []driver.Value) error {
+	pos := 0
+	for i := range columns {
+		vLen, vStart := ReadLengthEncodedInteger(data, pos)
+		if vLen == NullLength {
+			dest[i] = nil
+			pos = vStart
+			continue
+		}
+		vEnd := vStart + int(vLen)
+		pos = vEnd
+
+		raw := data[vStart:vEnd]
+		col := &columns[i]
+		switch col.Type {
+		case MYSQL_TYPE_TINY:
+			if col.Length == 1 {
+				dest[i] = vLen > 0 && raw[0] != '0'
+			} else {
+				dest[i] = textInt64(raw)
+			}
+		case MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24, MYSQL_TYPE_YEAR:
+			dest[i] = textInt64(raw)
+		case MYSQL_TYPE_LONGLONG:
+			if col.Flags&UNSIGNED_FLAG != 0 {
+				dest[i] = textUint64(raw)
+			} else {
+				dest[i] = textInt64(raw)
+			}
+		case MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE:
+			dest[i] = textFloat64(raw)
+		case MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL:
+			dest[i] = string(raw)
+		case MYSQL_TYPE_DATE, MYSQL_TYPE_NEWDATE:
+			dest[i] = textDate(raw)
+		case MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP:
+			dest[i] = textDatetime(raw)
+		case MYSQL_TYPE_TIME:
+			dest[i] = textDuration(raw)
+		case MYSQL_TYPE_JSON:
+			dest[i] = string(raw)
+		default:
+			if col.Charset == 63 {
+				dest[i] = raw
+			} else {
+				dest[i] = string(raw)
+			}
+		}
+	}
+	return nil
+}
 
 // ParseTextRow parses a row in text protocol, returning typed Go values.
 func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error) {
@@ -16,15 +70,11 @@ func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error
 	pos := 0
 
 	for i := range columns {
-		if data[pos] == 0xfb {
+		vLen, vStart := ReadLengthEncodedInteger(data, pos)
+		if vLen == NullLength {
 			values[i] = nil
-			pos++
+			pos = vStart
 			continue
-		}
-
-		vLen, vStart, err := ReadLengthEncodedInteger(data, pos)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 		}
 		vEnd := vStart + int(vLen)
 		pos = vEnd
@@ -38,8 +88,14 @@ func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error
 			} else {
 				values[i] = textInt64(raw)
 			}
-		case MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24, MYSQL_TYPE_LONGLONG, MYSQL_TYPE_YEAR:
+		case MYSQL_TYPE_SHORT, MYSQL_TYPE_LONG, MYSQL_TYPE_INT24, MYSQL_TYPE_YEAR:
 			values[i] = textInt64(raw)
+		case MYSQL_TYPE_LONGLONG:
+			if col.Flags&UNSIGNED_FLAG != 0 {
+				values[i] = textUint64(raw)
+			} else {
+				values[i] = textInt64(raw)
+			}
 		case MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE:
 			values[i] = textFloat64(raw)
 		case MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL:
@@ -62,6 +118,15 @@ func ParseTextRow(data []byte, columns []ColumnDefinition) ([]interface{}, error
 	}
 
 	return values, nil
+}
+
+// textUint64 parses an unsigned decimal integer from ASCII bytes.
+func textUint64(raw []byte) uint64 {
+	var v uint64
+	for _, b := range raw {
+		v = v*10 + uint64(b-'0')
+	}
+	return v
 }
 
 // textInt64 parses a decimal integer (optionally signed) from ASCII bytes.
@@ -99,7 +164,7 @@ func textDate(raw []byte) interface{} {
 	mo := textDig2(raw, 5)
 	d := textDig2(raw, 8)
 	if y == 0 && mo == 0 && d == 0 {
-		return nil
+		return time.Time{}
 	}
 	return time.Date(y, time.Month(mo), d, 0, 0, 0, 0, time.UTC)
 }
@@ -131,7 +196,7 @@ func textDatetime(raw []byte) interface{} {
 		ns = micro * 1000
 	}
 	if y == 0 && mo == 0 && d == 0 {
-		return nil
+		return time.Time{}
 	}
 	return time.Date(y, time.Month(mo), d, h, mi, s, ns, time.UTC)
 }

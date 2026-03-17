@@ -12,29 +12,19 @@ import (
 )
 
 // Rows implements driver.Rows interface.
-// Holds a list of completions (supports multi-resultset).
-// Pre-fetched rows are served first; remaining rows are streamed if MoreRows is set.
+// Holds a single completion; multi-result sets are advanced via NextResultSet.
 type Rows struct {
-	conn        *Conn
-	completions []*protocol.Completion
-	idx         int      // current completion index
-	rowPos      int      // position within current completion's pre-fetched Rows slice
-	colNames    []string // cached column name slice for the current result set
-	closed      bool
-}
-
-// current returns the active completion, or nil if exhausted
-func (r *Rows) current() *protocol.Completion {
-	if r.idx < len(r.completions) {
-		return r.completions[r.idx]
-	}
-	return nil
+	conn     *Conn
+	current  *protocol.Completion
+	rowPos   int      // position within current result set
+	colNames []string // cached column name slice for the current result set
+	closed   bool
 }
 
 // cols returns the columns of the current completion
 func (r *Rows) cols() []protocol.ColumnDefinition {
-	if c := r.current(); c != nil {
-		return c.Columns
+	if r.current != nil {
+		return r.current.Columns
 	}
 	return nil
 }
@@ -54,14 +44,6 @@ func (r *Rows) Columns() []string {
 	return names
 }
 
-// lastCompletion returns the last completion, which is the only one that can have MoreRows=true
-func (r *Rows) lastCompletion() *protocol.Completion {
-	if len(r.completions) == 0 {
-		return nil
-	}
-	return r.completions[len(r.completions)-1]
-}
-
 // Close closes the rows iterator
 func (r *Rows) Close() error {
 	if r.closed {
@@ -69,10 +51,8 @@ func (r *Rows) Close() error {
 	}
 	r.closed = true
 
-	// Drain the last completion if it still has rows on the wire
-	last := r.lastCompletion()
-	if last != nil && (!last.Loaded || (last.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0)) && r.conn != nil && !r.conn.client.IsClosed() {
-		_, _ = r.conn.client.ReadRemainingRows(last)
+	if r.current != nil && (!r.current.Loaded || r.current.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0) && r.conn != nil && !r.conn.client.IsClosed() {
+		_ = r.conn.client.DrainRemainingRows(r.current)
 	}
 
 	if r.conn != nil {
@@ -83,21 +63,15 @@ func (r *Rows) Close() error {
 
 // parseRow parses a raw row packet into dest using the current completion's binary flag
 func (r *Rows) parseRow(data []byte, c *protocol.Completion, dest []driver.Value) error {
-	var values []interface{}
 	var err error
 	if c.Binary {
-		values, err = protocol.ParseBinaryRow(data, c.Columns)
+		err = protocol.ParseBinaryRowDirect(data, c.Columns, dest)
 	} else {
-		values, err = protocol.ParseTextRow(data, c.Columns)
+		err = protocol.ParseTextRowDirect(data, c.Columns, dest)
 	}
 	if err != nil {
 		r.closed = true
 		return err
-	}
-	for i, v := range values {
-		if i < len(dest) {
-			dest[i] = v
-		}
 	}
 	return nil
 }
@@ -108,105 +82,86 @@ func (r *Rows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 
-	c := r.current()
-	if c == nil || !c.HasResultSet() {
+	if r.current == nil || !r.current.HasResultSet() {
 		return io.EOF
 	}
+	c := r.current
 
-	// Serve from pre-fetched rows first
-	if r.rowPos < len(c.Rows) {
-		data := c.Rows[r.rowPos]
+	// Row 0 is always pre-parsed into ParsedRow (avoids raw-byte allocation).
+	if r.rowPos == 0 {
+		if c.ParsedRow == nil {
+			return io.EOF // empty result set
+		}
+		copy(dest, c.ParsedRow)
 		r.rowPos++
-		return r.parseRow(data, c, dest)
+		return nil
 	}
 
-	// All pre-fetched rows consumed
 	if c.Loaded {
 		return io.EOF
 	}
 
-	// Fetch the next batch from the wire
-	loaded, err := r.fetchCurrentRows(c)
+	// Rows 1+ stream directly from the wire into dest.
+	loaded, err := r.fetchCurrentRow(c, dest)
 	if err != nil {
 		return err
 	}
-	r.rowPos = 0
-
 	if loaded {
-		if c.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0 {
-			more, err := r.conn.client.ReadCompletions(c.Binary, r.conn.client.FetchSize())
-			if err != nil {
-				r.closed = true
-				return err
-			}
-			r.completions = append(r.completions, more...)
-			if len(more) == 0 || more[len(more)-1].Loaded {
-				r.conn.client.ClearActiveRows()
-			}
-		} else {
-			r.conn.client.ClearActiveRows()
-		}
-	}
-
-	if len(c.Rows) == 0 {
+		// Terminator received — no row was written into dest.
+		r.conn.client.ClearActiveRows()
 		return io.EOF
 	}
-
-	data := c.Rows[r.rowPos]
 	r.rowPos++
-	return r.parseRow(data, c, dest)
+	return nil
 }
 
-// fetchCurrentRows reads row packets from the wire into c.Rows.
-// fetchSize=0 reads all rows. Must be called with the client mutex locked.
-// Returns loaded=true when the row terminator packet was received.
-func (r *Rows) fetchCurrentRows(c *protocol.Completion) (loaded bool, err error) {
-	fetchSize := r.conn.client.FetchSize()
-	for i := 0; i < fetchSize; i++ {
-		data, err := r.conn.client.Reader().ReadPacket()
-		if err != nil {
-			r.closed = true
-			return false, err
-		}
-
-		if len(data) > 0 && data[0] == 0xff {
-			r.closed = true
-			return false, protocol.ParseErrorPacket(data)
-		}
-
-		if len(data) > 0 && data[0] == 0xfe && len(data) < 0xffffff {
-			var term *protocol.Completion
-			if r.conn.context.IsEOFDeprecated() {
-				term, err = protocol.ParseOkPacket(data, r.conn.context)
-			} else {
-				term, err = protocol.ParseEOFPacket(data, r.conn.context)
-			}
-			if err != nil {
-				r.closed = true
-				return false, err
-			}
-			c.AffectedRows = term.AffectedRows
-			c.InsertID = term.InsertID
-			c.WarningCount = term.WarningCount
-			c.ServerStatus = term.ServerStatus
-			c.Message = term.Message
-			c.Loaded = true
-			c.Rows = c.Rows[:i]
-			return true, nil
-		}
-
-		c.Rows[i] = data
-	}
-	return false, nil
-}
-
-// fetchRemainingRows reads all remaining row packets from the wire into c.Rows.
+// fetchCurrentRow reads exactly one packet from the wire.
+// If it is a row packet it is parsed directly into dest and loaded=false is returned.
+// If it is the terminator (EOF/OK) the completion is updated and loaded=true is returned
+// (dest is left untouched).
+// ReadScratch is used so no allocation is made for the raw packet bytes.
 // Must be called with the client mutex locked.
-// Returns hitEOF=true when the row terminator packet was received.
-func (r *Rows) fetchRemainingRows(c *protocol.Completion) (loaded bool, err error) {
-	c.Rows = c.Rows[:0]
+func (r *Rows) fetchCurrentRow(c *protocol.Completion, dest []driver.Value) (loaded bool, err error) {
+	data, err := r.conn.client.Reader().ReadScratch()
+	if err != nil {
+		r.closed = true
+		return false, err
+	}
+
+	if data[0] == 0xff {
+		r.closed = true
+		return false, protocol.ParseErrorPacket(data)
+	}
+
+	if data[0] == 0xfe && len(data) < 0xffffff {
+		var term *protocol.Completion
+		if r.conn.context.IsEOFDeprecated() {
+			term, err = protocol.ParseOkPacket(data, r.conn.context)
+		} else {
+			term, err = protocol.ParseEOFPacket(data, r.conn.context)
+		}
+		if err != nil {
+			r.closed = true
+			return false, err
+		}
+		c.AffectedRows = term.AffectedRows
+		c.InsertID = term.InsertID
+		c.WarningCount = term.WarningCount
+		c.ServerStatus = term.ServerStatus
+		c.Message = term.Message
+		c.Loaded = true
+		return true, nil
+	}
+
+	return false, r.parseRow(data, c, dest)
+}
+
+// drainRemainingRows discards all remaining row packets from the wire without
+// storing them. The terminator (OK/EOF) is still parsed to update server status.
+// Must be called with the client mutex locked.
+func (r *Rows) drainRemainingRows(c *protocol.Completion) (loaded bool, err error) {
 	for {
-		data, err := r.conn.client.Reader().ReadPacket()
+		data, err := r.conn.client.Reader().ReadScratch()
 		if err != nil {
 			r.closed = true
 			return false, err
@@ -236,63 +191,54 @@ func (r *Rows) fetchRemainingRows(c *protocol.Completion) (loaded bool, err erro
 			c.Loaded = true
 			return true, nil
 		}
-
-		c.Rows = append(c.Rows, data)
+		// Row data — discarded.
 	}
 }
 
-// BufferRemaining reads all remaining rows from the wire into memory.
+// DrainRemaining discards all remaining rows still on the wire.
 // Called when the connection is needed for another command.
 // Must be called with client mutex locked.
-func (r *Rows) BufferRemaining() error {
-	if r.closed {
+func (r *Rows) DrainRemaining() error {
+	if r.closed || r.current == nil || r.current.Loaded {
 		return nil
 	}
-	last := r.lastCompletion()
-	if last == nil || last.Loaded {
-		return nil
-	}
-	loaded, err := r.fetchRemainingRows(last)
-	if err != nil {
-		return err
-	}
-	if loaded && last.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0 {
-		more, err := r.conn.client.ReadCompletions(last.Binary, 0)
-		if err != nil {
-			r.closed = true
-			return err
-		}
-		r.completions = append(r.completions, more...)
-	}
-	return nil
+	_, err := r.drainRemainingRows(r.current)
+	return err
 }
 
 // HasNextResultSet implements driver.RowsNextResultSet
 func (r *Rows) HasNextResultSet() bool {
-	for i := r.idx + 1; i < len(r.completions); i++ {
-		if r.completions[i].HasResultSet() {
-			return true
-		}
-	}
-	return false
+	return r.current != nil && r.current.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS != 0
 }
 
-// NextResultSet advances to the next result set, skipping non-result-set completions
+// NextResultSet advances to the next result set by reading the next completion.
+// It skips result-less completions (e.g. DO 1) as long as
+// SERVER_MORE_RESULTS_EXISTS is set, advancing to the next actual result set.
 func (r *Rows) NextResultSet() error {
+	if !r.HasNextResultSet() {
+		return io.EOF
+	}
 	for {
-		r.idx++
-		if r.idx >= len(r.completions) {
-			return io.EOF
+		comp, err := r.conn.client.ReadCompletion(r.current.Binary, r.current.Columns)
+		if err != nil {
+			r.closed = true
+			return err
 		}
-		c := r.completions[r.idx]
-		if c.HasResultSet() {
+		if comp.HasResultSet() {
+			r.current = comp
 			r.rowPos = 0
-			r.colNames = nil // invalidate column name cache for new result set
-			if !c.Loaded {
+			r.colNames = nil
+			if !comp.Loaded {
 				r.conn.client.SetActiveRows(r)
 			}
 			return nil
 		}
+		// No result set on this completion (e.g. DO 1).
+		// If more results follow, keep reading; otherwise we're done.
+		if comp.ServerStatus&protocol.SERVER_MORE_RESULTS_EXISTS == 0 {
+			return io.EOF
+		}
+		r.current = comp
 	}
 }
 

@@ -4,17 +4,14 @@
 package protocol
 
 import (
-	"encoding/binary"
 	"fmt"
 	"reflect"
 	"time"
-	"unsafe"
 )
 
 // ColumnDefinition represents a column definition packet.
 // Hot-path numeric fields are placed first so they occupy the first cache line
 // during row parsing (ParseTextRow / ParseBinaryRow never touch Name).
-// Name is a zero-copy alias into raw packet bytes (no string allocation per column).
 type ColumnDefinition struct {
 	// Hot-path: accessed on every row — kept first for cache locality
 	Type     byte
@@ -22,31 +19,34 @@ type ColumnDefinition struct {
 	Flags    uint16
 	Charset  uint16
 	Length   uint32
-	// Cold-path: name decoded lazily / zero-copy (only Columns() call)
-	raw  []byte // keeps packet backing array alive so Name remains valid
-	Name string // zero-copy via unsafe.String — no allocation
-	// Extended metadata (zero-copy slices into the packet buffer kept alive by raw)
+	// Cold-path: column name (copied out of the packet so scratch buffers can be reused)
+	Name string
+	// Extended metadata (copied; only populated when EXTENDED_METADATA is negotiated)
 	ExtendedType []byte
 	Format       []byte
 }
 
-// skipLengthEncoded advances pos past a length-encoded string without allocating.
-func skipLengthEncoded(data []byte, pos int) (int, error) {
-	n, newPos, err := ReadLengthEncodedInteger(data, pos)
-	if err != nil {
-		return pos, err
+// skipIdentifier advances pos past a length-encoded identifier.
+// SQL identifiers have a maximum length of 256, so the encoding is either:
+//
+//	< 0xfb  → 1-byte length, value is the byte itself (common path)
+//	  0xfc  → 2-byte LE length follows
+//
+// No error return: column definition packets from the server are trusted.
+func skipIdentifier(data []byte, pos int) int {
+	l := int(data[pos])
+	pos++
+	if l < 0xfb {
+		return pos + l
 	}
-	end := newPos + int(n)
-	if end > len(data) {
-		return pos, fmt.Errorf("column definition: field exceeds packet boundary")
-	}
-	return end, nil
+	// 0xfc: two-byte LE length
+	l = int(data[pos]) | int(data[pos+1])<<8
+	return pos + 2 + l
 }
 
 // FillColumnDefinition parses a column definition packet into a pre-allocated col.
-// Catalog, Schema, Table, OrgTable and OrgName are skipped to avoid allocations.
-// Name is decoded zero-copy: it aliases the packet bytes via unsafe.String so no
-// string allocation occurs. col.raw keeps the packet backing array alive.
+// Catalog, Schema, Table, OrgTable and OrgName are skipped without allocations.
+// Name is copied out of the packet buffer so callers may use ReadScratch.
 //
 // extMetadata must be true when the EXTENDED_METADATA capability was negotiated.
 // The server then inserts an optional tagged block between the 6 strings and the
@@ -59,30 +59,23 @@ func skipLengthEncoded(data []byte, pos int) (int, error) {
 func FillColumnDefinition(data []byte, col *ColumnDefinition, extMetadata bool) error {
 	pos := 0
 
-	var err error
-	// Skip: catalog, schema, table, org_table (4 length-encoded strings)
+	// Skip: catalog, schema, table, org_table (4 length-encoded identifiers)
 	for range 4 {
-		if pos, err = skipLengthEncoded(data, pos); err != nil {
-			return fmt.Errorf("failed to skip column field: %w", err)
-		}
+		pos = skipIdentifier(data, pos)
 	}
 
-	// Name: zero-copy alias into the raw packet bytes — no string allocation.
-	nameLen, nameStart, err := ReadLengthEncodedInteger(data, pos)
-	if err != nil {
-		return fmt.Errorf("failed to read name length: %w", err)
+	// Name: copy out of packet so scratch buffer can be reused.
+	nameLen := int(data[pos])
+	pos++
+	if nameLen >= 0xfb {
+		nameLen = int(data[pos]) | int(data[pos+1])<<8
+		pos += 2
 	}
-	nameEnd := nameStart + int(nameLen)
-
-	col.raw = data // keep backing array alive as long as ColumnDefinition is live
-	//nolint:unsafeptr
-	col.Name = unsafe.String(unsafe.SliceData(data[nameStart:nameEnd]), int(nameLen))
-	pos = nameEnd
+	col.Name = string(data[pos : pos+nameLen])
+	pos += nameLen
 
 	// Skip: org_name
-	if pos, err = skipLengthEncoded(data, pos); err != nil {
-		return fmt.Errorf("failed to skip org_name: %w", err)
-	}
+	pos = skipIdentifier(data, pos)
 
 	// Extended metadata block — present only when EXTENDED_METADATA was negotiated.
 	// Layout: one byte that is either 0x00 (no info) or the first byte of a
@@ -93,10 +86,7 @@ func FillColumnDefinition(data []byte, col *ColumnDefinition, extMetadata bool) 
 		}
 		if data[pos] != 0x00 {
 			// Revert and read the whole block as a length-encoded byte sequence.
-			blockLen, blockStart, err2 := ReadLengthEncodedInteger(data, pos)
-			if err2 != nil {
-				return fmt.Errorf("failed to read extended metadata block length: %w", err2)
-			}
+			blockLen, blockStart := ReadLengthEncodedInteger(data, pos)
 			blockEnd := blockStart + int(blockLen)
 			if blockEnd > len(data) {
 				return fmt.Errorf("extended metadata block exceeds packet boundary")
@@ -104,16 +94,13 @@ func FillColumnDefinition(data []byte, col *ColumnDefinition, extMetadata bool) 
 			for sub := blockStart; sub < blockEnd; {
 				tag := data[sub]
 				sub++
-				vLen, vStart, err3 := ReadLengthEncodedInteger(data, sub)
-				if err3 != nil {
-					break
-				}
+				vLen, vStart := ReadLengthEncodedInteger(data, sub)
 				vEnd := vStart + int(vLen)
 				switch tag {
 				case 0:
-					col.ExtendedType = data[vStart:vEnd]
+					col.ExtendedType = append([]byte(nil), data[vStart:vEnd]...)
 				case 1:
-					col.Format = data[vStart:vEnd]
+					col.Format = append([]byte(nil), data[vStart:vEnd]...)
 				}
 				sub = vEnd
 			}
@@ -123,30 +110,15 @@ func FillColumnDefinition(data []byte, col *ColumnDefinition, extMetadata bool) 
 		}
 	}
 
-	// Fixed-length fields marker (always 0x0c = 12)
-	fixedLen := data[pos]
-	pos++
-
-	_ = data[pos+int(fixedLen)-1]
-
-	// Character set (2 bytes)
-	col.Charset = binary.LittleEndian.Uint16(data[pos:])
-	pos += 2
-
-	// Column length (4 bytes)
-	col.Length = binary.LittleEndian.Uint32(data[pos:])
-	pos += 4
-
-	// Column type (1 byte)
-	col.Type = data[pos]
-	pos++
-
-	// Flags (2 bytes)
-	col.Flags = binary.LittleEndian.Uint16(data[pos:])
-	pos += 2
-
-	// Decimals (1 byte)
-	col.Decimals = data[pos]
+	// Fixed-length fields block is always 0x0c (12 bytes). Skip the length marker.
+	// One bounds check on the last byte we read lets the compiler eliminate the rest.
+	pos++ // skip 0x0c
+	_ = data[pos+9]
+	col.Charset = uint16(data[pos]) | uint16(data[pos+1])<<8
+	col.Length = uint32(data[pos+2]) | uint32(data[pos+3])<<8 | uint32(data[pos+4])<<16 | uint32(data[pos+5])<<24
+	col.Type = data[pos+6]
+	col.Flags = uint16(data[pos+7]) | uint16(data[pos+8])<<8
+	col.Decimals = data[pos+9]
 
 	return nil
 }

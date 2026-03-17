@@ -4,11 +4,41 @@
 package protocol
 
 import (
+	"database/sql/driver"
 	"encoding/binary"
 	"fmt"
 	"math"
 	"time"
 )
+
+// ParseBinaryRowDirect parses a binary-protocol row directly into dest, avoiding the
+// intermediate []interface{} allocation that ParseBinaryRow requires.
+func ParseBinaryRowDirect(data []byte, columns []ColumnDefinition, dest []driver.Value) error {
+	if data[0] != 0x00 {
+		return fmt.Errorf("invalid binary row packet")
+	}
+	pos := 1
+	numColumns := len(columns)
+	nullBitmapLen := (numColumns + 7 + 2) / 8
+	_ = data[pos+nullBitmapLen-1]
+	nullBitmap := data[pos : pos+nullBitmapLen]
+	pos += nullBitmapLen
+
+	for i := range columns {
+		bytePos := (i + 2) / 8
+		bitPos := (i + 2) % 8
+		if nullBitmap[bytePos]&(1<<bitPos) != 0 {
+			dest[i] = nil
+			continue
+		}
+		var err error
+		pos, err = readBinaryValue(data, pos, &columns[i], &dest[i])
+		if err != nil {
+			return fmt.Errorf("failed to read column %d: %w", i, err)
+		}
+	}
+	return nil
+}
 
 // ParseBinaryRow parses a row in binary protocol (prepared statement)
 func ParseBinaryRow(data []byte, columns []ColumnDefinition) ([]interface{}, error) {
@@ -24,7 +54,7 @@ func ParseBinaryRow(data []byte, columns []ColumnDefinition) ([]interface{}, err
 	nullBitmap := data[pos : pos+nullBitmapLen]
 	pos += nullBitmapLen
 
-	values := make([]interface{}, numColumns)
+	values := make([]driver.Value, numColumns)
 
 	for i := range columns {
 		bytePos := (i + 2) / 8
@@ -35,77 +65,88 @@ func ParseBinaryRow(data []byte, columns []ColumnDefinition) ([]interface{}, err
 		}
 
 		var err error
-		values[i], pos, err = readBinaryValue(data, pos, &columns[i])
+		pos, err = readBinaryValue(data, pos, &columns[i], &values[i])
 		if err != nil {
 			return nil, fmt.Errorf("failed to read column %d: %w", i, err)
 		}
 	}
 
-	return values, nil
+	result := make([]interface{}, numColumns)
+	for i, v := range values {
+		result[i] = v
+	}
+	return result, nil
 }
 
-// readBinaryValue reads a single typed value from a binary protocol row packet.
-func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, int, error) {
+// readBinaryValue reads a single typed value from a binary protocol row packet
+// and writes it directly into *out, avoiding interface{} boxing on the return path.
+func readBinaryValue(data []byte, pos int, col *ColumnDefinition, out *driver.Value) (int, error) {
 	switch col.Type {
 	case MYSQL_TYPE_TINY:
 		val := data[pos]
 		// TINYINT(1) is treated as bool
 		if col.Length == 1 {
-			return val != 0, pos + 1, nil
+			*out = val != 0
+			return pos + 1, nil
 		}
 		if col.Flags&UNSIGNED_FLAG != 0 {
-			return uint64(val), pos + 1, nil
+			*out = uint64(val)
+		} else {
+			*out = int64(int8(val))
 		}
-		return int64(int8(val)), pos + 1, nil
+		return pos + 1, nil
 
 	case MYSQL_TYPE_SHORT, MYSQL_TYPE_YEAR:
 		_ = data[pos+1]
 		val := binary.LittleEndian.Uint16(data[pos:])
 		if col.Flags&UNSIGNED_FLAG != 0 {
-			return uint64(val), pos + 2, nil
+			*out = uint64(val)
+		} else {
+			*out = int64(int16(val))
 		}
-		return int64(int16(val)), pos + 2, nil
+		return pos + 2, nil
 
 	case MYSQL_TYPE_LONG, MYSQL_TYPE_INT24:
 		_ = data[pos+3]
 		val := binary.LittleEndian.Uint32(data[pos:])
 		if col.Flags&UNSIGNED_FLAG != 0 {
-			return uint64(val), pos + 4, nil
+			*out = uint64(val)
+		} else {
+			*out = int64(int32(val))
 		}
-		return int64(int32(val)), pos + 4, nil
+		return pos + 4, nil
 
 	case MYSQL_TYPE_LONGLONG:
 		_ = data[pos+7]
 		val := binary.LittleEndian.Uint64(data[pos:])
 		if col.Flags&UNSIGNED_FLAG != 0 {
-			return val, pos + 8, nil
+			*out = val
+		} else {
+			*out = int64(val)
 		}
-		return int64(val), pos + 8, nil
+		return pos + 8, nil
 
 	case MYSQL_TYPE_FLOAT:
 		_ = data[pos+3]
 		bits := binary.LittleEndian.Uint32(data[pos:])
-		return float64(math.Float32frombits(bits)), pos + 4, nil
+		*out = float64(math.Float32frombits(bits))
+		return pos + 4, nil
 
 	case MYSQL_TYPE_DOUBLE:
 		_ = data[pos+7]
 		bits := binary.LittleEndian.Uint64(data[pos:])
-		return math.Float64frombits(bits), pos + 8, nil
+		*out = math.Float64frombits(bits)
+		return pos + 8, nil
 
 	case MYSQL_TYPE_DATE, MYSQL_TYPE_DATETIME, MYSQL_TYPE_TIMESTAMP:
-		// DATE/DATETIME/TIMESTAMP are length-encoded in binary protocol
-		// Length byte followed by date/time components
 		length := int(data[pos])
 		pos++
 
 		if length == 0 {
-			// Zero date: 0000-00-00 00:00:00
-			return time.Time{}, pos, nil
+			*out = time.Time{}
+			return pos, nil
 		}
 
-		// Length 4: year(2) month(1) day(1)
-		// Length 7: year(2) month(1) day(1) hour(1) minute(1) second(1)
-		// Length 11: year(2) month(1) day(1) hour(1) minute(1) second(1) microsecond(4)
 		_ = data[pos+length-1]
 
 		year := int(binary.LittleEndian.Uint16(data[pos:]))
@@ -118,23 +159,20 @@ func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, 
 			minute = int(data[pos+5])
 			second = int(data[pos+6])
 		}
-
 		if length == 11 {
 			microsecond = int(binary.LittleEndian.Uint32(data[pos+7:]))
 		}
 
-		t := time.Date(year, time.Month(month), day, hour, minute, second, microsecond*1000, time.UTC)
-		return t, pos + length, nil
+		*out = time.Date(year, time.Month(month), day, hour, minute, second, microsecond*1000, time.UTC)
+		return pos + length, nil
 
 	case MYSQL_TYPE_TIME:
-		// TIME is length-encoded in binary protocol
-		// Length 8: is_negative(1) days(4) hours(1) minutes(1) seconds(1)
-		// Length 12: is_negative(1) days(4) hours(1) minutes(1) seconds(1) microseconds(4)
 		length := int(data[pos])
 		pos++
 
 		if length == 0 {
-			return time.Duration(0), pos, nil
+			*out = time.Duration(0)
+			return pos, nil
 		}
 
 		_ = data[pos+length-1]
@@ -152,96 +190,104 @@ func readBinaryValue(data []byte, pos int, col *ColumnDefinition) (interface{}, 
 
 		duration := time.Duration(days*24*3600+hours*3600+minutes*60+seconds)*time.Second +
 			time.Duration(microseconds)*time.Microsecond
-
 		if isNegative {
 			duration = -duration
 		}
-
-		return duration, pos + length, nil
+		*out = duration
+		return pos + length, nil
 
 	case MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VAR_STRING, MYSQL_TYPE_STRING,
 		MYSQL_TYPE_DECIMAL, MYSQL_TYPE_NEWDECIMAL,
 		MYSQL_TYPE_BLOB, MYSQL_TYPE_TINY_BLOB, MYSQL_TYPE_MEDIUM_BLOB, MYSQL_TYPE_LONG_BLOB,
 		MYSQL_TYPE_BIT, MYSQL_TYPE_ENUM, MYSQL_TYPE_SET, MYSQL_TYPE_GEOMETRY, MYSQL_TYPE_JSON:
-		vLen, vStart, err := ReadLengthEncodedInteger(data, pos)
-		if err != nil {
-			return nil, pos, err
-		}
+		vLen, vStart := ReadLengthEncodedInteger(data, pos)
 		vEnd := vStart + int(vLen)
 		// binary charset (63) → []byte; JSON is always text even with binary charset
 		if col.Charset == 63 && col.Type != MYSQL_TYPE_JSON {
-			return data[vStart:vEnd], vEnd, nil
+			*out = data[vStart:vEnd]
+		} else {
+			*out = string(data[vStart:vEnd])
 		}
-		return string(data[vStart:vEnd]), vEnd, nil
+		return vEnd, nil
 
 	default:
-		return nil, pos, fmt.Errorf("unsupported field type: %d", col.Type)
+		return pos, fmt.Errorf("unsupported field type: %d", col.Type)
 	}
 }
 
-// EncodeParamValue encodes a parameter value for a binary protocol packet.
-func EncodeParamValue(arg interface{}) ([]byte, error) {
+// AppendParamValue appends the binary-protocol encoding of arg to buf and
+// returns the extended slice. No intermediate allocation is made for fixed-size
+// types (int64, float64, bool, time.Time, …) — the value is written directly
+// into whatever capacity buf already has. This is the preferred hot-path
+// called by NewExecute; callers should pre-allocate buf with enough capacity.
+func AppendParamValue(buf []byte, arg interface{}) ([]byte, error) {
 	switch v := arg.(type) {
-	case string:
-		return WriteLengthEncodedString(nil, v), nil
-	case []byte:
-		buf := WriteLengthEncodedInteger(nil, uint64(len(v)))
-		return append(buf, v...), nil
+	case bool:
+		if v {
+			return append(buf, 1), nil
+		}
+		return append(buf, 0), nil
+	case int8:
+		return append(buf, byte(v)), nil
+	case int16:
+		return binary.LittleEndian.AppendUint16(buf, uint16(v)), nil
+	case int32:
+		return binary.LittleEndian.AppendUint32(buf, uint32(v)), nil
 	case int64:
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(v))
-		return buf, nil
-	case float64:
-		// For DECIMAL/DOUBLE types, encode as 8-byte IEEE 754 double
-		buf := make([]byte, 8)
-		bits := math.Float64bits(v)
-		binary.LittleEndian.PutUint64(buf, bits)
-		return buf, nil
+		return binary.LittleEndian.AppendUint64(buf, uint64(v)), nil
+	case uint8:
+		return append(buf, v), nil
+	case uint16:
+		return binary.LittleEndian.AppendUint16(buf, v), nil
+	case uint32:
+		return binary.LittleEndian.AppendUint32(buf, v), nil
+	case uint64:
+		return binary.LittleEndian.AppendUint64(buf, v), nil
 	case float32:
-		// For FLOAT types, encode as 4-byte IEEE 754 float
-		buf := make([]byte, 4)
-		bits := math.Float32bits(v)
-		binary.LittleEndian.PutUint32(buf, bits)
-		return buf, nil
+		return binary.LittleEndian.AppendUint32(buf, math.Float32bits(v)), nil
+	case float64:
+		return binary.LittleEndian.AppendUint64(buf, math.Float64bits(v)), nil
+	case string:
+		return WriteLengthEncodedString(buf, v), nil
+	case []byte:
+		buf = WriteLengthEncodedInteger(buf, uint64(len(v)))
+		return append(buf, v...), nil
 	case time.Time:
 		if v.IsZero() {
-			return []byte{0}, nil
+			return append(buf, 0), nil
 		}
 		year, month, day := v.Date()
 		hour, min, sec := v.Clock()
 		micro := v.Nanosecond() / 1000
 		if micro != 0 {
-			buf := make([]byte, 12)
-			buf[0] = 11
-			binary.LittleEndian.PutUint16(buf[1:], uint16(year))
-			buf[3] = byte(month)
-			buf[4] = byte(day)
-			buf[5] = byte(hour)
-			buf[6] = byte(min)
-			buf[7] = byte(sec)
-			binary.LittleEndian.PutUint32(buf[8:], uint32(micro))
+			buf = append(buf, 11,
+				byte(year), byte(year>>8),
+				byte(month), byte(day),
+				byte(hour), byte(min), byte(sec),
+				0, 0, 0, 0,
+			)
+			binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(micro))
 			return buf, nil
 		}
 		if hour != 0 || min != 0 || sec != 0 {
-			buf := make([]byte, 8)
-			buf[0] = 7
-			binary.LittleEndian.PutUint16(buf[1:], uint16(year))
-			buf[3] = byte(month)
-			buf[4] = byte(day)
-			buf[5] = byte(hour)
-			buf[6] = byte(min)
-			buf[7] = byte(sec)
-			return buf, nil
+			return append(buf, 7,
+				byte(year), byte(year>>8),
+				byte(month), byte(day),
+				byte(hour), byte(min), byte(sec),
+			), nil
 		}
-		buf := make([]byte, 5)
-		buf[0] = 4
-		binary.LittleEndian.PutUint16(buf[1:], uint16(year))
-		buf[3] = byte(month)
-		buf[4] = byte(day)
-		return buf, nil
+		return append(buf, 4,
+			byte(year), byte(year>>8),
+			byte(month), byte(day),
+		), nil
 	default:
-		// Convert to string as fallback
 		str := fmt.Sprintf("%v", v)
-		return WriteLengthEncodedString(nil, str), nil
+		return WriteLengthEncodedString(buf, str), nil
 	}
+}
+
+// EncodeParamValue encodes a parameter value into a fresh []byte.
+// Prefer AppendParamValue for hot-paths to avoid the extra allocation.
+func EncodeParamValue(arg interface{}) ([]byte, error) {
+	return AppendParamValue(nil, arg)
 }

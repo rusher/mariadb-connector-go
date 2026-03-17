@@ -3,6 +3,8 @@
 
 package protocol
 
+import "database/sql/driver"
+
 // ServerMessage represents a message from the server
 type ServerMessage interface {
 	GetSequence() uint8
@@ -25,10 +27,10 @@ type Completion struct {
 	Message      string
 
 	// Populated for result sets
-	Columns []ColumnDefinition
-	Binary  bool
-	Rows    [][]byte // pre-fetched row packets
-	Loaded  bool     // true if all row packets are in memory (false = still streaming)
+	Columns   []ColumnDefinition
+	Binary    bool
+	ParsedRow []driver.Value // pre-parsed row 0 (always set when result set has ≥1 rows)
+	Loaded    bool           // true = terminator received; false = rows still on the wire
 }
 
 // HasResultSet returns true if this completion carries a result set

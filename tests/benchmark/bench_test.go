@@ -51,6 +51,10 @@ func dsn() string {
 	return fmt.Sprintf("%s@tcp(%s:%s)/%s", user, host, port, db)
 }
 
+func mysqlDSN() string {
+	return dsn() + "?interpolateParams=true"
+}
+
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
 type driverFixture struct {
@@ -71,7 +75,7 @@ func TestMain(m *testing.M) {
 	mariaDB.SetMaxOpenConns(1)
 	mariaDB.SetMaxIdleConns(1)
 
-	mysqlDB, err := sql.Open("mysql", d)
+	mysqlDB, err := sql.Open("mysql", mysqlDSN())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mysql open: %v\n", err)
 		os.Exit(1)
@@ -116,8 +120,8 @@ func setupSchema(db *sql.DB) {
 }
 
 func teardownSchema(db *sql.DB) {
-	db.Exec("DROP TABLE IF EXISTS bench_100cols")  //nolint:errcheck
-	db.Exec("DROP TABLE IF EXISTS bench_insert")   //nolint:errcheck
+	db.Exec("DROP TABLE IF EXISTS bench_100cols") //nolint:errcheck
+	db.Exec("DROP TABLE IF EXISTS bench_insert")  //nolint:errcheck
 }
 
 func mustExec(db *sql.DB, query string) {
