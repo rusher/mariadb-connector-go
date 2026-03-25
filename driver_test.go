@@ -1336,6 +1336,14 @@ func TestLongData(t *testing.T) {
 
 func TestLoadData(t *testing.T) {
 	runTests(t, dsn, func(dbt *DBTest) {
+		var localInfile bool
+		if err := dbt.db.QueryRow("SELECT @@local_infile").Scan(&localInfile); err != nil {
+			dbt.Fatal(err)
+		}
+		if !localInfile {
+			dbt.Skip("local_infile is disabled on this server")
+		}
+
 		verifyLoadDataResult := func() {
 			rows, err := dbt.db.Query("SELECT * FROM test")
 			if err != nil {
@@ -1956,6 +1964,11 @@ func TestConcurrent(t *testing.T) {
 		err := dbt.db.QueryRow("SELECT @@max_connections").Scan(&max)
 		if err != nil {
 			dbt.Fatalf("%s", err.Error())
+		}
+		// Leave headroom for internal/system connections
+		max = max - 10
+		if max < 1 {
+			max = 1
 		}
 		dbt.Logf("testing up to %d concurrent connections \r\n", max)
 

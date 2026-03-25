@@ -90,7 +90,9 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -A 5 '\-\-\- FAIL' test-output.log || echo 'No FAIL lines found in output'
+          grep -B 20 -A 5 '\-\-\- FAIL' test-output.log || echo 'No FAIL lines found in output'
+          echo "---"
+          grep -i 'FATAL\|Error\|panic' test-output.log | tail -50 || true
 
       - name: Run Benchmarks
         shell: bash
