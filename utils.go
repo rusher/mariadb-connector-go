@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2012 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -53,7 +56,7 @@ var (
 //	    RootCAs: rootCertPool,
 //	    Certificates: clientCert,
 //	})
-//	db, err := sql.Open("mysql", "user@tcp(localhost:3306)/test?tls=custom")
+//	db, err := sql.Open("mariadb", "user@tcp(localhost:3306)/test?tls=custom")
 func RegisterTLSConfig(key string, config *tls.Config) error {
 	if _, isBool := readBool(key); isBool || strings.ToLower(key) == "skip-verify" || strings.ToLower(key) == "preferred" {
 		return fmt.Errorf("key '%s' is reserved", key)

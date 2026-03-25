@@ -1,19 +1,22 @@
 // Copyright 2012 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// Package mysql provides a MySQL driver for Go's database/sql package.
+// Package mysql provides a MariaDB/MySQL driver for Go's database/sql package.
 //
 // The driver should be used via the database/sql package:
 //
 //	import "database/sql"
-//	import _ "github.com/go-sql-driver/mysql"
+//	import _ "github.com/mariadb-corporation/mariadb-connector-go"
 //
-//	db, err := sql.Open("mysql", "user:password@/dbname")
+//	db, err := sql.Open("mariadb", "user:password@/dbname")
 //
-// See https://github.com/go-sql-driver/mysql#usage for details
+// See https://github.com/mariadb-corporation/mariadb-connector-go#usage for details
 package mysql
 
 import (
@@ -24,9 +27,14 @@ import (
 	"sync"
 )
 
-// MySQLDriver is exported to make the driver directly accessible.
+// MariaDBDriver is exported to make the driver directly accessible.
 // In general the driver is used via the database/sql package.
-type MySQLDriver struct{}
+type MariaDBDriver struct{}
+
+// MySQLDriver is an alias for backward compatibility.
+//
+// Deprecated: Use MariaDBDriver instead.
+type MySQLDriver = MariaDBDriver
 
 // DialFunc is a function which can be used to establish the network connection.
 // Custom dial functions must be registered with RegisterDial
@@ -76,7 +84,7 @@ func RegisterDial(network string, dial DialFunc) {
 }
 
 // Open new Connection.
-// See https://github.com/go-sql-driver/mysql#dsn-data-source-name for how
+// See https://github.com/mariadb-corporation/mariadb-connector-go#dsn-data-source-name for how
 // the DSN string is formatted
 func (d MySQLDriver) Open(dsn string) (driver.Conn, error) {
 	cfg, err := ParseDSN(dsn)
@@ -88,8 +96,8 @@ func (d MySQLDriver) Open(dsn string) (driver.Conn, error) {
 }
 
 // This variable can be replaced with -ldflags like below:
-// go build "-ldflags=-X github.com/go-sql-driver/mysql.driverName=custom"
-var driverName = "mysql"
+// go build "-ldflags=-X github.com/mariadb-corporation/mariadb-connector-go.driverName=custom"
+var driverName = "mariadb"
 
 func init() {
 	if driverName != "" {

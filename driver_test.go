@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2013 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -36,7 +39,7 @@ import (
 )
 
 // This variable can be replaced with -ldflags like below:
-// go test "-ldflags=-X github.com/go-sql-driver/mysql.driverNameTest=custom"
+// go test "-ldflags=-X github.com/mariadb-corporation/mariadb-connector-go.driverNameTest=custom"
 var driverNameTest string
 
 func init() {
@@ -72,7 +75,7 @@ var (
 	sDateTime0 = "0000-00-00 00:00:00"
 )
 
-// See https://github.com/go-sql-driver/mysql/wiki/Testing
+// See https://github.com/mariadb-corporation/mariadb-connector-go/wiki/Testing
 func init() {
 	// get environment variables
 	env := func(key, defaultValue string) string {
@@ -226,7 +229,7 @@ func runTestsParallel(t *testing.T, dsn string, tests ...func(dbt *DBTest, table
 			t.Parallel()
 
 			tableName := newTableName(t)
-			db, err := sql.Open("mysql", dsn)
+			db, err := sql.Open("mariadb", dsn)
 			if err != nil {
 				t.Fatalf("error connecting: %s", err.Error())
 			}
@@ -245,7 +248,7 @@ func runTestsParallel(t *testing.T, dsn string, tests ...func(dbt *DBTest, table
 				t.Parallel()
 
 				tableName := newTableName(t)
-				db, err := sql.Open("mysql", dsn2)
+				db, err := sql.Open("mariadb", dsn2)
 				if err != nil {
 					t.Fatalf("error connecting: %s", err.Error())
 				}
@@ -682,7 +685,7 @@ func TestRawBytes(t *testing.T) {
 			if !bytes.Equal(v2, o2) {
 				dbt.Errorf("expected %v, got %v", v2, o2)
 			}
-			// https://github.com/go-sql-driver/mysql/issues/765
+			// https://github.com/mariadb-corporation/mariadb-connector-go/issues/765
 			// Appending to RawBytes shouldn't overwrite next RawBytes.
 			o1 = append(o1, "xyzzy"...)
 			if !bytes.Equal(v2, o2) {
@@ -3572,10 +3575,10 @@ func TestErrorInMultiResult(t *testing.T) {
 	if !available {
 		t.Skipf("MySQL server not running on %s", netAddr)
 	}
-	// https://github.com/go-sql-driver/mysql/issues/1361
+	// https://github.com/mariadb-corporation/mariadb-connector-go/issues/1361
 	var db *sql.DB
 	if _, err := ParseDSN(dsn); err != errInvalidDSNUnsafeCollation {
-		db, err = sql.Open("mysql", dsn)
+		db, err = sql.Open("mariadb", dsn)
 		if err != nil {
 			t.Fatalf("error connecting: %s", err.Error())
 		}

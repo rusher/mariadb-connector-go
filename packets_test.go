@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2016 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -313,7 +316,7 @@ func TestReadPacketFail(t *testing.T) {
 	}
 }
 
-// https://github.com/go-sql-driver/mysql/pull/801
+// https://github.com/mariadb-corporation/mariadb-connector-go/pull/801
 // not-NUL terminated plugin_name in init packet
 func TestRegression801(t *testing.T) {
 	conn := new(mockConn)

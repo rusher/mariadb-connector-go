@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2012 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -14,7 +17,7 @@ const (
 	debug = false // for debugging. Set true only in development.
 
 	defaultAuthPlugin       = "mysql_native_password"
-	defaultMaxAllowedPacket = 64 << 20 // 64 MiB. See https://github.com/go-sql-driver/mysql/issues/1355
+	defaultMaxAllowedPacket = 64 << 20 // 64 MiB. See https://github.com/mariadb-corporation/mariadb-connector-go/issues/1355
 	minProtocolVersion      = 10
 	maxPacketSize           = 1<<24 - 1
 	timeFormat              = "2006-01-02 15:04:05.999999"

@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2018 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -166,6 +169,7 @@ func TestAuthFastCachingSHA256PasswordFullRSA(t *testing.T) {
 	conn, mc := newRWMockConn(1)
 	mc.cfg.User = "root"
 	mc.cfg.Passwd = "secret"
+	mc.cfg.AllowPublicKeyRetrieval = true
 
 	authData := []byte{6, 81, 96, 114, 14, 42, 50, 30, 76, 47, 1, 95, 126, 81,
 		62, 94, 83, 80, 52, 85}
@@ -774,6 +778,7 @@ func TestAuthSwitchCachingSHA256PasswordEmpty(t *testing.T) {
 func TestAuthSwitchCachingSHA256PasswordFullRSA(t *testing.T) {
 	conn, mc := newRWMockConn(2)
 	mc.cfg.Passwd = "secret"
+	mc.cfg.AllowPublicKeyRetrieval = true
 
 	// auth switch request
 	conn.data = []byte{44, 0, 0, 2, 254, 99, 97, 99, 104, 105, 110, 103, 95,

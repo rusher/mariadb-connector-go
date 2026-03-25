@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2018 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -14,9 +17,6 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
-	"crypto/x509"
-	"encoding/pem"
-	"fmt"
 	"sync"
 
 	"filippo.io/edwards25519"
@@ -266,81 +266,13 @@ func authEd25519(scramble []byte, password string) ([]byte, error) {
 	return append(R.Bytes(), S.Bytes()...), nil
 }
 
-func (mc *mysqlConn) sendEncryptedPassword(seed []byte, pub *rsa.PublicKey) error {
-	enc, err := encryptPassword(mc.cfg.Passwd, seed, pub)
-	if err != nil {
-		return err
-	}
-	return mc.writeAuthSwitchPacket(enc)
-}
-
 func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
-	switch plugin {
-	case "caching_sha2_password":
-		authResp := scrambleSHA256Password(authData, mc.cfg.Passwd)
-		return authResp, nil
-
-	case "mysql_old_password":
-		if !mc.cfg.AllowOldPasswords {
-			return nil, ErrOldPassword
-		}
-		if len(mc.cfg.Passwd) == 0 {
-			return nil, nil
-		}
-		// Note: there are edge cases where this should work but doesn't;
-		// this is currently "wontfix":
-		// https://github.com/go-sql-driver/mysql/issues/184
-		authResp := append(scrambleOldPassword(authData[:8], mc.cfg.Passwd), 0)
-		return authResp, nil
-
-	case "mysql_clear_password":
-		if !mc.cfg.AllowCleartextPasswords {
-			return nil, ErrCleartextPassword
-		}
-		// http://dev.mysql.com/doc/refman/5.7/en/cleartext-authentication-plugin.html
-		// http://dev.mysql.com/doc/refman/5.7/en/pam-authentication-plugin.html
-		return append([]byte(mc.cfg.Passwd), 0), nil
-
-	case "mysql_native_password":
-		if !mc.cfg.AllowNativePasswords {
-			return nil, ErrNativePassword
-		}
-		// https://dev.mysql.com/doc/dev/mysql-server/8.4.5/page_protocol_connection_phase_authentication_methods_native_password_authentication.html
-		// Native password authentication only need and will need 20-byte challenge.
-		authResp := scramblePassword(authData[:20], mc.cfg.Passwd)
-		return authResp, nil
-
-	case "sha256_password":
-		if len(mc.cfg.Passwd) == 0 {
-			return []byte{0}, nil
-		}
-		// unlike caching_sha2_password, sha256_password does not accept
-		// cleartext password on unix transport.
-		if mc.cfg.TLS != nil {
-			// write cleartext auth packet
-			return append([]byte(mc.cfg.Passwd), 0), nil
-		}
-
-		pubKey := mc.cfg.pubKey
-		if pubKey == nil {
-			// request public key from server
-			return []byte{1}, nil
-		}
-
-		// encrypted password
-		enc, err := encryptPassword(mc.cfg.Passwd, authData, pubKey)
-		return enc, err
-
-	case "client_ed25519":
-		if len(authData) != 32 {
-			return nil, ErrMalformPkt
-		}
-		return authEd25519(authData, mc.cfg.Passwd)
-
-	default:
+	p := getAuthPlugin(plugin)
+	if p == nil {
 		mc.log("unknown auth plugin:", plugin)
 		return nil, ErrUnknownPlugin
 	}
+	return p.InitAuth(authData, newAuthPluginConfig(mc.cfg))
 }
 
 func (mc *mysqlConn) handleAuthResult(oldAuthData []byte, plugin string) error {
@@ -383,102 +315,59 @@ func (mc *mysqlConn) handleAuthResult(oldAuthData []byte, plugin string) error {
 		}
 	}
 
-	switch plugin {
+	// Delegate continuation to the plugin's ContinuationAuth method.
+	p := getAuthPlugin(plugin)
+	if p == nil {
+		// Unknown plugin, but if authData is empty the server accepted us.
+		if len(authData) == 0 {
+			return nil
+		}
+		return ErrUnknownPlugin
+	}
 
-	// https://dev.mysql.com/blog-archive/preparing-your-community-connector-for-mysql-8-part-2-sha256/
-	case "caching_sha2_password":
-		switch len(authData) {
-		case 0:
-			return nil // auth successful
-		case 1:
-			switch authData[0] {
-			case cachingSha2PasswordFastAuthSuccess:
-				if err = mc.resultUnchanged().readResultOK(); err == nil {
-					return nil // auth successful
-				}
+	cfg := newAuthPluginConfig(mc.cfg)
 
-			case cachingSha2PasswordPerformFullAuthentication:
-				if mc.cfg.TLS != nil || mc.cfg.Net == "unix" {
-					// write cleartext auth packet
-					err = mc.writeAuthSwitchPacket(append([]byte(mc.cfg.Passwd), 0))
-					if err != nil {
-						return err
-					}
-				} else {
-					pubKey := mc.cfg.pubKey
-					if pubKey == nil {
-						// request public key from server
-						data, err := mc.buf.takeSmallBuffer(4 + 1)
-						if err != nil {
-							return err
-						}
-						data[4] = cachingSha2PasswordRequestPublicKey
-						err = mc.writePacket(data)
-						if err != nil {
-							return err
-						}
-
-						if data, err = mc.readPacket(); err != nil {
-							return err
-						}
-
-						if data[0] != iAuthMoreData {
-							return fmt.Errorf("unexpected resp from server for caching_sha2_password, perform full authentication")
-						}
-
-						// parse public key
-						block, rest := pem.Decode(data[1:])
-						if block == nil {
-							return fmt.Errorf("no pem data found, data: %s", rest)
-						}
-						pkix, err := x509.ParsePKIXPublicKey(block.Bytes)
-						if err != nil {
-							return err
-						}
-						pubKey = pkix.(*rsa.PublicKey)
-					}
-
-					// send encrypted password
-					err = mc.sendEncryptedPassword(oldAuthData, pubKey)
-					if err != nil {
-						return err
-					}
-				}
-				return mc.resultUnchanged().readResultOK()
-
-			default:
-				return ErrMalformPkt
-			}
-		default:
-			return ErrMalformPkt
+	// Loop to handle multi-round authentication exchanges.
+	for {
+		if len(authData) == 0 {
+			return nil // auth successful, no more data from server
 		}
 
-	case "sha256_password":
-		switch len(authData) {
-		case 0:
-			return nil // auth successful
-		default:
-			block, _ := pem.Decode(authData)
-			if block == nil {
-				return fmt.Errorf("no Pem data found, data: %s", authData)
-			}
+		nextPacket, done, err := p.ContinuationAuth(authData, oldAuthData, cfg)
+		if err != nil {
+			return err
+		}
 
-			pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-			if err != nil {
+		if nextPacket != nil {
+			if err = mc.writeAuthSwitchPacket(nextPacket); err != nil {
 				return err
 			}
+		}
 
-			// send encrypted password
-			err = mc.sendEncryptedPassword(oldAuthData, pub.(*rsa.PublicKey))
-			if err != nil {
-				return err
-			}
+		if done {
+			// Plugin says we're done. Read the final OK from the server.
 			return mc.resultUnchanged().readResultOK()
 		}
 
-	default:
-		return nil // auth successful
-	}
+		// Plugin needs another round. Read the next server packet.
+		data, err := mc.readPacket()
+		if err != nil {
+			return err
+		}
 
-	return err
+		switch data[0] {
+		case iOK:
+			// resultUnchanged, since auth happens before any queries or
+			// commands have been executed.
+			return mc.resultUnchanged().handleOkPacket(data)
+		case iAuthMoreData:
+			authData = data[1:]
+		case iERR:
+			return mc.handleErrorPacket(data)
+		default:
+			// Some plugins (e.g. PAM/dialog) receive raw prompt packets
+			// without the iAuthMoreData prefix.
+			authData = data
+		}
+	}
 }

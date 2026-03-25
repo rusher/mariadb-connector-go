@@ -1,6 +1,9 @@
-// Go MySQL Driver - A MySQL-Driver for Go's database/sql package
+// MariaDB Connector/Go - A MariaDB/MySQL-Driver for Go's database/sql package
 //
 // Copyright 2016 The Go-MySQL-Driver Authors. All rights reserved.
+// Copyright 2026 MariaDB Corporation Ab. All rights reserved.
+//
+// SPDX-License-Identifier: MPL-2.0
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this file,
@@ -64,6 +67,7 @@ type Config struct {
 	AllowFallbackToPlaintext bool // Allows fallback to unencrypted connection if server does not support TLS
 	AllowNativePasswords     bool // Allows the native password authentication method
 	AllowOldPasswords        bool // Allows the old insecure password method
+	AllowPublicKeyRetrieval  bool // Allows retrieval of the server's public key for authentication
 	CheckConnLiveness        bool // Check connections for liveness before using them
 	ClientFoundRows          bool // Return number of matching rows instead of rows changed
 	ColumnsWithAlias         bool // Prepend table alias to column names
@@ -90,11 +94,12 @@ type Option func(*Config) error
 // NewConfig creates a new Config and sets default values.
 func NewConfig() *Config {
 	cfg := &Config{
-		Loc:                  time.UTC,
-		MaxAllowedPacket:     defaultMaxAllowedPacket,
-		Logger:               defaultLogger,
-		AllowNativePasswords: true,
-		CheckConnLiveness:    true,
+		Loc:                     time.UTC,
+		MaxAllowedPacket:        defaultMaxAllowedPacket,
+		Logger:                  defaultLogger,
+		AllowNativePasswords:    true,
+		AllowPublicKeyRetrieval: true,
+		CheckConnLiveness:       true,
 	}
 	return cfg
 }
@@ -300,6 +305,10 @@ func (cfg *Config) FormatDSN() string {
 
 	if cfg.AllowOldPasswords {
 		writeDSNParam(&buf, &hasParam, "allowOldPasswords", "true")
+	}
+
+	if !cfg.AllowPublicKeyRetrieval {
+		writeDSNParam(&buf, &hasParam, "allowPublicKeyRetrieval", "false")
 	}
 
 	if !cfg.CheckConnLiveness {
@@ -525,6 +534,14 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 				return errors.New("invalid bool value: " + value)
 			}
 
+		// Allow retrieval of the server's public key
+		case "allowPublicKeyRetrieval":
+			var isBool bool
+			cfg.AllowPublicKeyRetrieval, isBool = readBool(value)
+			if !isBool {
+				return errors.New("invalid bool value: " + value)
+			}
+
 		// Check connections for Liveness before using them
 		case "checkConnLiveness":
 			var isBool bool
@@ -630,7 +647,7 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 
 		// Strict mode
 		case "strict":
-			panic("strict mode has been removed. See https://github.com/go-sql-driver/mysql/wiki/strict-mode")
+			panic("strict mode has been removed. See https://github.com/mariadb-corporation/mariadb-connector-go/wiki/strict-mode")
 
 		// Dial Timeout
 		case "timeout":

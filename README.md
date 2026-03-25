@@ -32,7 +32,7 @@ A MySQL-Driver for Go's [database/sql](https://golang.org/pkg/database/sql/) pac
 ## Features
   * Lightweight and [fast](https://github.com/go-sql-driver/sql-benchmark "golang MySQL-Driver performance")
   * Native Go implementation. No C-bindings, just pure Go
-  * Connections over TCP/IPv4, TCP/IPv6, Unix domain sockets or [custom protocols](https://godoc.org/github.com/go-sql-driver/mysql#DialFunc)
+  * Connections over TCP/IPv4, TCP/IPv6, Unix domain sockets or [custom protocols](https://godoc.org/github.com/mariadb-corporation/mariadb-connector-go#DialFunc)
   * Automatic handling of broken connections
   * Automatic Connection Pooling *(by database/sql package)*
   * Supports queries larger than 16MB
@@ -60,7 +60,7 @@ A MySQL-Driver for Go's [database/sql](https://golang.org/pkg/database/sql/) pac
 ## Installation
 Simple install the package to your [$GOPATH](https://github.com/golang/go/wiki/GOPATH "GOPATH") with the [go tool](https://golang.org/cmd/go/ "go command") from shell:
 ```bash
-go get -u github.com/go-sql-driver/mysql
+go get -u github.com/mariadb-corporation/mariadb-connector-go
 ```
 Make sure [Git is installed](https://git-scm.com/downloads) on your machine and in your system's `PATH`.
 
@@ -74,12 +74,12 @@ import (
 	"database/sql"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/mariadb-corporation/mariadb-connector-go"
 )
 
 // ...
 
-db, err := sql.Open("mysql", "user:password@/dbname")
+db, err := sql.Open("mariadb", "user:password@/dbname")
 if err != nil {
 	panic(err)
 }
@@ -89,7 +89,7 @@ db.SetMaxOpenConns(10)
 db.SetMaxIdleConns(10)
 ```
 
-[Examples are available in our Wiki](https://github.com/go-sql-driver/mysql/wiki/Examples "Go-MySQL-Driver Examples").
+[Examples are available in our Wiki](https://github.com/mariadb-corporation/mariadb-connector-go/wiki/Examples "Go-MySQL-Driver Examples").
 
 ### Important settings
 
@@ -132,7 +132,7 @@ This has the same effect as an empty DSN string:
 /dbname%2Fwithslash
 ```
 
-Alternatively, [Config.FormatDSN](https://godoc.org/github.com/go-sql-driver/mysql#Config.FormatDSN) can be used to create a DSN string by filling a struct.
+Alternatively, [Config.FormatDSN](https://godoc.org/github.com/mariadb-corporation/mariadb-connector-go#Config.FormatDSN) can be used to create a DSN string by filling a struct.
 
 #### Password
 Passwords can consist of any character. Escaping is **not** necessary.
@@ -202,7 +202,7 @@ Type:           bool
 Valid Values:   true, false
 Default:        false
 ```
-`allowOldPasswords=true` allows the usage of the insecure old password method. This should be avoided, but is necessary in some cases. See also [the old_passwords wiki page](https://github.com/go-sql-driver/mysql/wiki/old_passwords).
+`allowOldPasswords=true` allows the usage of the insecure old password method. This should be avoided, but is necessary in some cases. See also [the old_passwords wiki page](https://github.com/mariadb-corporation/mariadb-connector-go/wiki/old_passwords).
 
 ##### `charset`
 
@@ -411,7 +411,7 @@ Valid Values:   <name>
 Default:        none
 ```
 
-Server public keys can be registered with [`mysql.RegisterServerPubKey`](https://godoc.org/github.com/go-sql-driver/mysql#RegisterServerPubKey), which can then be used by the assigned name in the DSN.
+Server public keys can be registered with [`mysql.RegisterServerPubKey`](https://godoc.org/github.com/mariadb-corporation/mariadb-connector-go#RegisterServerPubKey), which can then be used by the assigned name in the DSN.
 Public keys are used to transmit encrypted data, e.g. for authentication.
 If the server's public key is known, it should be set manually to avoid expensive and potentially insecure transmissions of the public key from the server to the client each time it is required.
 
@@ -434,7 +434,7 @@ Valid Values:   true, false, skip-verify, preferred, <name>
 Default:        false
 ```
 
-`tls=true` enables TLS / SSL encrypted connection to the server. Use `skip-verify` if you want to use a self-signed or invalid certificate (server side) or use `preferred` to use TLS only when advertised by the server. This is similar to `skip-verify`, but additionally allows a fallback to a connection which is not encrypted. Neither `skip-verify` nor `preferred` add any reliable security. You can use a custom TLS config after registering it with [`mysql.RegisterTLSConfig`](https://godoc.org/github.com/go-sql-driver/mysql#RegisterTLSConfig).
+`tls=true` enables TLS / SSL encrypted connection to the server. Use `skip-verify` if you want to use a self-signed or invalid certificate (server side) or use `preferred` to use TLS only when advertised by the server. This is similar to `skip-verify`, but additionally allows a fallback to a connection which is not encrypted. Neither `skip-verify` nor `preferred` add any reliable security. You can use a custom TLS config after registering it with [`mysql.RegisterTLSConfig`](https://godoc.org/github.com/mariadb-corporation/mariadb-connector-go#RegisterTLSConfig).
 
 
 ##### `writeTimeout`
@@ -540,14 +540,14 @@ See [context support in the database/sql package](https://golang.org/doc/go1.8#d
 ### `LOAD DATA LOCAL INFILE` support
 For this feature you need direct access to the package. Therefore you must change the import path (no `_`):
 ```go
-import "github.com/go-sql-driver/mysql"
+import "github.com/mariadb-corporation/mariadb-connector-go"
 ```
 
 Files must be explicitly allowed by registering them with `mysql.RegisterLocalFile(filepath)` (recommended) or the allowlist check must be deactivated by using the DSN parameter `allowAllFiles=true` ([*Might be insecure!*](https://dev.mysql.com/doc/refman/8.0/en/load-data.html#load-data-local)).
 
 To use a `io.Reader` a handler function must be registered with `mysql.RegisterReaderHandler(name, handler)` which returns a `io.Reader` or `io.ReadCloser`. The Reader is available with the filepath `Reader::<name>` then. Choose different names for different handlers and `DeregisterReaderHandler` when you don't need it anymore.
 
-See the [godoc of Go-MySQL-Driver](https://godoc.org/github.com/go-sql-driver/mysql "golang mysql driver documentation") for details.
+See the [godoc of Go-MySQL-Driver](https://godoc.org/github.com/mariadb-corporation/mariadb-connector-go "golang mysql driver documentation") for details.
 
 
 ### `time.Time` support
@@ -555,7 +555,7 @@ The default internal output type of MySQL `DATE` and `DATETIME` values is `[]byt
 
 However, many want to scan MySQL `DATE` and `DATETIME` values into `time.Time` variables, which is the logical equivalent in Go to `DATE` and `DATETIME` in MySQL. You can do that by changing the internal output type from `[]byte` to `time.Time` with the DSN parameter `parseTime=true`. You can set the default [`time.Time` location](https://golang.org/pkg/time/#Location) with the `loc` DSN parameter.
 
-**Caution:** As of Go 1.1, this makes `time.Time` the only variable type you can scan `DATE` and `DATETIME` values into. This breaks for example [`sql.RawBytes` support](https://github.com/go-sql-driver/mysql/wiki/Examples#rawbytes).
+**Caution:** As of Go 1.1, this makes `time.Time` the only variable type you can scan `DATE` and `DATETIME` values into. This breaks for example [`sql.RawBytes` support](https://github.com/mariadb-corporation/mariadb-connector-go/wiki/Examples#rawbytes).
 
 
 ### Unicode support
@@ -570,17 +570,17 @@ Other charsets / collations can be set using the [`charset`](#charset) or [`coll
 See http://dev.mysql.com/doc/refman/8.0/en/charset-unicode.html for more details on MySQL's Unicode support.
 
 ## Testing / Development
-To run the driver tests you may need to adjust the configuration. See the [Testing Wiki-Page](https://github.com/go-sql-driver/mysql/wiki/Testing "Testing") for details.
+To run the driver tests you may need to adjust the configuration. See the [Testing Wiki-Page](https://github.com/mariadb-corporation/mariadb-connector-go/wiki/Testing "Testing") for details.
 
 Go-MySQL-Driver is not feature-complete yet. Your help is very appreciated.
-If you want to contribute, you can work on an [open issue](https://github.com/go-sql-driver/mysql/issues?state=open) or review a [pull request](https://github.com/go-sql-driver/mysql/pulls).
+If you want to contribute, you can work on an [open issue](https://github.com/mariadb-corporation/mariadb-connector-go/issues?state=open) or review a [pull request](https://github.com/mariadb-corporation/mariadb-connector-go/pulls).
 
-See the [Contribution Guidelines](https://github.com/go-sql-driver/mysql/blob/master/.github/CONTRIBUTING.md) for details.
+See the [Contribution Guidelines](https://github.com/mariadb-corporation/mariadb-connector-go/blob/master/.github/CONTRIBUTING.md) for details.
 
 ---------------------------------------
 
 ## License
-Go-MySQL-Driver is licensed under the [Mozilla Public License Version 2.0](https://raw.github.com/go-sql-driver/mysql/master/LICENSE)
+Go-MySQL-Driver is licensed under the [Mozilla Public License Version 2.0](https://raw.github.com/mariadb-corporation/mariadb-connector-go/master/LICENSE)
 
 Mozilla summarizes the license scope as follows:
 > MPL: The copyleft applies to any files containing MPLed code.
@@ -593,6 +593,6 @@ That means:
 
 Please read the [MPL 2.0 FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/) if you have further questions regarding the license.
 
-You can read the full terms here: [LICENSE](https://raw.github.com/go-sql-driver/mysql/master/LICENSE).
+You can read the full terms here: [LICENSE](https://raw.github.com/mariadb-corporation/mariadb-connector-go/master/LICENSE).
 
 ![Go Gopher and MySQL Dolphin](https://raw.github.com/wiki/go-sql-driver/mysql/go-mysql-driver_m.jpg "Golang Gopher transporting the MySQL Dolphin in a wheelbarrow")
