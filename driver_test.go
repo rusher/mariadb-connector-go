@@ -88,7 +88,7 @@ func init() {
 	pass = env("MYSQL_TEST_PASS", "")
 	prot = env("MYSQL_TEST_PROT", "tcp")
 	addr = env("MYSQL_TEST_ADDR", "localhost:3306")
-	dbname = env("MYSQL_TEST_DBNAME", "gotest")
+	dbname = env("MYSQL_TEST_DBNAME", "testgo")
 	netAddr = fmt.Sprintf("%s(%s)", prot, addr)
 	dsn = fmt.Sprintf("%s:%s@%s/%s?timeout=30s", user, pass, netAddr, dbname)
 	c, err := net.Dial(prot, addr)
@@ -1380,7 +1380,7 @@ func TestLoadData(t *testing.T) {
 		dbt.mustExec("CREATE TABLE test (id INT NOT NULL PRIMARY KEY, value TEXT NOT NULL) CHARACTER SET utf8")
 
 		// Local File
-		file, err := os.CreateTemp("", "gotest")
+		file, err := os.CreateTemp("", "testgo")
 		defer os.Remove(file.Name())
 		if err != nil {
 			dbt.Fatal(err)

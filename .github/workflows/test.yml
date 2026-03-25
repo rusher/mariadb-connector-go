@@ -17,7 +17,7 @@ concurrency:
 env:
   MYSQL_TEST_USER: root
   MYSQL_TEST_PASS: "heyPassw-!*20oRd"
-  MYSQL_TEST_ADDR: 127.0.0.1:3306
+  MYSQL_TEST_ADDR: mariadb.example.com:3306
   MYSQL_TEST_DBNAME: testgo
   MYSQL_TEST_CONCURRENT: 1
 
@@ -81,14 +81,19 @@ jobs:
           go-version: ${{ matrix.go || '1.26' }}
 
       - name: Run Tests
+        shell: bash
         run: |
-          go test -v -race -covermode=atomic -coverprofile=coverage.out -parallel 10
-        env:
-          LOCAL_DB: ${{ steps.setup-env.outputs.database-type }}
-          DB_TYPE: ${{ matrix.db-type }}
-          DB_VERSION: ${{ matrix.db-tag }}
+          go test -v -race '-covermode=atomic' '-coverprofile=coverage.out' -parallel 10 2>&1 | tee test-output.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Show failures
+        if: failure()
+        shell: bash
+        run: |
+          grep -A 5 '\-\-\- FAIL' test-output.log || echo 'No FAIL lines found in output'
 
       - name: Run Benchmarks
+        shell: bash
         run: |
           go test -run '^$' -bench .
 
